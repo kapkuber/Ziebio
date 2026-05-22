@@ -54,7 +54,7 @@ export const FOV_SCALE = 0.003;
 
 export const REGEN_BASE_FACTOR = 0.03;
 export const REGEN_PER_POINT = 0.12;
-export const REGEN_HYPER_DELAY = 30; // seconds since last damage
+export const REGEN_HYPER_DELAY = 10; // seconds since last damage
 export const REGEN_HYPER_MULTIPLIER = 4;
 
 export const BODY_DAMAGE_BASE = 5;
@@ -85,19 +85,69 @@ export const HIGH_SPEED_DAMAGE_PENALTY = 0.08;
 
 export const IMPACT_SPEED_BONUS = 0.25;
 
-export const SHAPE_BASE_DAMAGE: Record<"square" | "triangle", number> = {
+export type ShapeKind = "square" | "triangle" | "pentagon";
+
+export const SHAPE_BASE_DAMAGE: Record<ShapeKind, number> = {
   square: 2,
   triangle: 4,
+  pentagon: 8,
 };
 
-export const BASE_XP_TO_LEVEL = 60;
-export const XP_PER_LEVEL = 20;
-export const XP_PER_HP = 1;
-export const SCORE_PER_HP = 5;
-export const SCORE_MULTIPLIER: Record<"square" | "triangle", number> = {
-  square: 1,
-  triangle: 1.5,
+export const XP_PER_KILL: Record<ShapeKind, number> = {
+  square: 10,
+  triangle: 25,
+  pentagon: 130,
 };
+
+// Cumulative XP required to BE at the given level. Index = level - 1.
+// Level 1 starts at 0 XP; level 45 is the cap.
+export const TOTAL_XP_AT_LEVEL: readonly number[] = [
+  0,      // L1
+  4,      // L2
+  13,     // L3
+  28,     // L4
+  50,     // L5
+  78,     // L6
+  113,    // L7
+  157,    // L8
+  211,    // L9
+  275,    // L10
+  350,    // L11
+  437,    // L12
+  538,    // L13
+  655,    // L14
+  787,    // L15
+  948,    // L16
+  1109,   // L17
+  1301,   // L18
+  1516,   // L19
+  1767,   // L20
+  2026,   // L21
+  2325,   // L22
+  2647,   // L23
+  3035,   // L24
+  3433,   // L25
+  3883,   // L26
+  4379,   // L27
+  4925,   // L28
+  5525,   // L29
+  6184,   // L30
+  6907,   // L31
+  7698,   // L32
+  8537,   // L33
+  9426,   // L34
+  10368,  // L35
+  11367,  // L36
+  12426,  // L37
+  13549,  // L38
+  14739,  // L39
+  16000,  // L40
+  17337,  // L41
+  18754,  // L42
+  20256,  // L43
+  21849,  // L44
+  23536,  // L45
+];
 
 export function clampStatPoints(points: StatPoints): StatPoints {
   return {
@@ -134,7 +184,13 @@ export function baseMaxHpForLevel(level: number): number {
 }
 
 export function xpForNextLevel(level: number): number {
-  return BASE_XP_TO_LEVEL + XP_PER_LEVEL * Math.max(0, level - 1);
+  if (level < 1 || level >= MAX_LEVEL) return Infinity;
+  return TOTAL_XP_AT_LEVEL[level] - TOTAL_XP_AT_LEVEL[level - 1];
+}
+
+export function totalXpAtLevel(level: number): number {
+  const clamped = Math.max(1, Math.min(MAX_LEVEL, Math.floor(level)));
+  return TOTAL_XP_AT_LEVEL[clamped - 1];
 }
 
 export interface DerivedStats {
@@ -209,14 +265,10 @@ export function impactMultiplierFromSpeed(speed: number): number {
   return 1 + ratio * IMPACT_SPEED_BONUS;
 }
 
-export function xpForKill(kind: "square" | "triangle", maxHp: number): number {
-  const base = Math.max(1, maxHp);
-  const multiplier = SCORE_MULTIPLIER[kind] ?? 1;
-  return Math.round(base * multiplier * XP_PER_HP);
+export function xpForKill(kind: ShapeKind, _maxHp: number): number {
+  return XP_PER_KILL[kind] ?? 0;
 }
 
-export function scoreForKill(kind: "square" | "triangle", maxHp: number): number {
-  const base = Math.max(1, maxHp);
-  const multiplier = SCORE_MULTIPLIER[kind] ?? 1;
-  return Math.round(base * multiplier * SCORE_PER_HP);
+export function scoreForKill(kind: ShapeKind, _maxHp: number): number {
+  return XP_PER_KILL[kind] ?? 0;
 }

@@ -3,9 +3,12 @@ import type { GameEntity } from "./entities";
 import {
   SQUARE_SIZE,
   TRIANGLE_SIZE,
+  PENTAGON_SIZE,
   computeEntityCollisionRadius,
   triangleWorldVerts,
+  pentagonWorldVerts,
   circleIntersectsTriangle,
+  circleIntersectsPolygon,
   ENTITY_COLLISION_INSET,
   HIT_FLASH_DURATION,
   ENTITY_BOUNCE,
@@ -27,6 +30,7 @@ export interface BulletUpdateParams {
   maxSpawnsPerFrame: number;
   spawnSquare: (entities: GameEntity[]) => boolean;
   spawnTriangle: (entities: GameEntity[]) => boolean;
+  spawnPentagon: (entities: GameEntity[]) => boolean;
   queueDeathEffect: (entity: GameEntity) => void;
   onEntityKilled?: (entity: GameEntity) => void;
 }
@@ -46,6 +50,7 @@ export function updateBullets({
   maxSpawnsPerFrame,
   spawnSquare,
   spawnTriangle,
+  spawnPentagon,
   queueDeathEffect,
   onEntityKilled,
 }: BulletUpdateParams): BulletUpdateResult {
@@ -60,7 +65,7 @@ export function updateBullets({
     for (const bullet of bullets) {
       if (bullet.radius > maxBulletRadius) maxBulletRadius = bullet.radius;
     }
-    const cellSize = Math.max(SQUARE_SIZE, TRIANGLE_SIZE, maxBulletRadius * 2);
+    const cellSize = Math.max(SQUARE_SIZE, TRIANGLE_SIZE, PENTAGON_SIZE, maxBulletRadius * 2);
     const bins = new Map<number, GameEntity[]>();
     const key = (cx: number, cy: number) => ((cx << 16) ^ (cy & 0xffff)) | 0;
 
@@ -79,6 +84,7 @@ export function updateBullets({
     const removed = new Set<number>();
     let removedSquares = 0;
     let removedTriangles = 0;
+    let removedPentagons = 0;
 
     bulletLoop: for (const bullet of bullets) {
       if (bullet.life <= 0) continue;
@@ -90,27 +96,36 @@ export function updateBullets({
           if (!bucket) continue;
           for (const entity of bucket) {
             if (removed.has(entity.id)) continue;
+            const applyHit = (baseDamage: number, dxh: number, dyh: number, kickSign: 1 | -1) => {
+              const actualDamage = computeBulletHitDamage(bullet.damage, bullet.hp, baseDamage);
+              (entity as any).hp = Math.max(0, (entity as any).hp - actualDamage);
+              (entity as any).hitT = HIT_FLASH_DURATION;
+              const len = Math.hypot(dxh, dyh) || 1;
+              (entity as any).kick.x += kickSign * (dxh / len) * ENTITY_BOUNCE;
+              (entity as any).kick.y += kickSign * (dyh / len) * ENTITY_BOUNCE;
+              bullet.hp -= baseDamage;
+              if (bullet.hp <= 0) bullet.life = 0;
+              if ((entity as any).hp <= 0) {
+                queueDeathEffect(entity);
+                removed.add(entity.id);
+                if (entity.kind === "triangle") removedTriangles += 1;
+                else if (entity.kind === "pentagon") removedPentagons += 1;
+                else removedSquares += 1;
+                if (onEntityKilled) onEntityKilled(entity);
+              }
+            };
             if (entity.kind === "triangle") {
               const insetSize = Math.max(1, entity.size - 2 * ENTITY_COLLISION_INSET);
               const [v0, v1, v2] = triangleWorldVerts(entity.pos, entity.angle, insetSize);
               if (circleIntersectsTriangle({ x: bullet.pos.x, y: bullet.pos.y }, bullet.radius, v0, v1, v2)) {
-                const baseDamage = SHAPE_BASE_DAMAGE.triangle;
-                const actualDamage = computeBulletHitDamage(bullet.damage, bullet.hp, baseDamage);
-                (entity as any).hp = Math.max(0, (entity as any).hp - actualDamage);
-                (entity as any).hitT = HIT_FLASH_DURATION;
-                const dxh = entity.pos.x - bullet.pos.x;
-                const dyh = entity.pos.y - bullet.pos.y;
-                const len = Math.hypot(dxh, dyh) || 1;
-                (entity as any).kick.x += (dxh / len) * ENTITY_BOUNCE;
-                (entity as any).kick.y += (dyh / len) * ENTITY_BOUNCE;
-                bullet.hp -= baseDamage;
-                if (bullet.hp <= 0) bullet.life = 0;
-                if ((entity as any).hp <= 0) {
-                  queueDeathEffect(entity);
-                  removed.add(entity.id);
-                  removedTriangles += 1;
-                  if (onEntityKilled) onEntityKilled(entity);
-                }
+                applyHit(SHAPE_BASE_DAMAGE.triangle, entity.pos.x - bullet.pos.x, entity.pos.y - bullet.pos.y, 1);
+                continue bulletLoop;
+              }
+            } else if (entity.kind === "pentagon") {
+              const insetSize = Math.max(1, entity.size - 2 * ENTITY_COLLISION_INSET);
+              const [p0, p1, p2, p3, p4] = pentagonWorldVerts(entity.pos, entity.angle, insetSize);
+              if (circleIntersectsPolygon({ x: bullet.pos.x, y: bullet.pos.y }, bullet.radius, [p0, p1, p2, p3, p4])) {
+                applyHit(SHAPE_BASE_DAMAGE.pentagon, entity.pos.x - bullet.pos.x, entity.pos.y - bullet.pos.y, 1);
                 continue bulletLoop;
               }
             } else {
@@ -118,21 +133,7 @@ export function updateBullets({
               const dyp = bullet.pos.y - entity.pos.y;
               const radius = bullet.radius + computeEntityCollisionRadius(entity.size);
               if (dxp * dxp + dyp * dyp <= radius * radius) {
-                const baseDamage = SHAPE_BASE_DAMAGE.square;
-                const actualDamage = computeBulletHitDamage(bullet.damage, bullet.hp, baseDamage);
-                (entity as any).hp = Math.max(0, (entity as any).hp - actualDamage);
-                (entity as any).hitT = HIT_FLASH_DURATION;
-                const len = Math.hypot(dxp, dyp) || 1;
-                (entity as any).kick.x -= (dxp / len) * ENTITY_BOUNCE;
-                (entity as any).kick.y -= (dyp / len) * ENTITY_BOUNCE;
-                bullet.hp -= baseDamage;
-                if (bullet.hp <= 0) bullet.life = 0;
-                if ((entity as any).hp <= 0) {
-                  queueDeathEffect(entity);
-                  removed.add(entity.id);
-                  removedSquares += 1;
-                  if (onEntityKilled) onEntityKilled(entity);
-                }
+                applyHit(SHAPE_BASE_DAMAGE.square, dxp, dyp, -1);
                 continue bulletLoop;
               }
             }
@@ -142,7 +143,6 @@ export function updateBullets({
     }
 
     if (removed.size) {
-      const originalCount = entities.length;
       entities = entities.filter((entity) => !removed.has(entity.id));
       let spawned = 0;
       while (removedSquares > 0 && spawned < maxSpawnsPerFrame) {
@@ -157,6 +157,15 @@ export function updateBullets({
       while (removedTriangles > 0 && spawned < maxSpawnsPerFrame) {
         if (spawnTriangle(entities)) {
           removedTriangles -= 1;
+          spawned += 1;
+          spawnsThisFrame++;
+        } else {
+          break;
+        }
+      }
+      while (removedPentagons > 0 && spawned < maxSpawnsPerFrame) {
+        if (spawnPentagon(entities)) {
+          removedPentagons -= 1;
           spawned += 1;
           spawnsThisFrame++;
         } else {

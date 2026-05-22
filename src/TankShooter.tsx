@@ -3,6 +3,7 @@ import type { Vec2 as EntVec2, GameEntity } from "./game/entities";
 import {
   SQUARE_MAX_COUNT,
   TRIANGLE_MAX_COUNT,
+  PENTAGON_MAX_COUNT,
   HIT_FLASH_DURATION,
   PLAYER_CONTACT_DPS,
   resolveEntityEntityCollisions,
@@ -47,9 +48,9 @@ import {
   computeDerivedStats,
   impactMultiplierFromSpeed,
   scoreForKill,
-  totalSkillPointsForLevel,
   xpForKill,
   xpForNextLevel,
+  type StatKey,
   type StatPoints,
 } from "./game/stats";
 
@@ -73,6 +74,17 @@ const INITIAL_STATS: StatPoints = {
   bulletDamage: 0,
   reload: 0,
   movementSpeed: 0,
+};
+
+const STAT_COLORS: Record<StatKey, string> = {
+  healthRegen: "#EF99C3",
+  maxHealth: "#8D6ADF",
+  bodyDamage: "#D83848",
+  bulletSpeed: "#3CA4CB",
+  bulletPenetration: "#B9E87E",
+  bulletDamage: "#FDF380",
+  reload: "#E7896D",
+  movementSpeed: "#70D1CA",
 };
 
 export default function TankShooter() {
@@ -114,6 +126,12 @@ export default function TankShooter() {
     while (tris < 2) {
       if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, { x: MAP_WIDTH/2, y: MAP_HEIGHT/2 }, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle')) {
         tris++;
+      } else break;
+    }
+    let pents = 0;
+    while (pents < PENTAGON_MAX_COUNT) {
+      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, { x: MAP_WIDTH/2, y: MAP_HEIGHT/2 }, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'pentagon')) {
+        pents++;
       } else break;
     }
   }, []);
@@ -309,23 +327,24 @@ export default function TankShooter() {
       const camera = getCamera(zoom);
       drawGrid(ctx, camera, gridPatternsRef.current);
       // Entities update/draw via module
-      const maybeSpawnNear = (x: number, y: number, kind: 'square'|'triangle') => {
-        const countSquares = entitiesRef.current.filter(e => e.kind === 'square').length;
-        const countTris = entitiesRef.current.filter(e => e.kind === 'triangle').length;
-        if (kind === 'square' && countSquares < SQUARE_MAX_COUNT && spawnsThisFrameRef.current < MAX_SPAWNS_PER_FRAME) {
-          if (entsSpawnNear(entitiesRef.current as any, nextEntityIdRef as any, x, y, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'square')) {
-            spawnsThisFrameRef.current++;
-          }
-        } else if (kind === 'triangle' && countTris < TRIANGLE_MAX_COUNT && spawnsThisFrameRef.current < MAX_SPAWNS_PER_FRAME) {
-          if (entsSpawnNear(entitiesRef.current as any, nextEntityIdRef as any, x, y, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle')) {
-            spawnsThisFrameRef.current++;
-          }
+      const KIND_CAPS: Record<'square'|'triangle'|'pentagon', number> = {
+        square: SQUARE_MAX_COUNT,
+        triangle: TRIANGLE_MAX_COUNT,
+        pentagon: PENTAGON_MAX_COUNT,
+      };
+      const maybeSpawnNear = (x: number, y: number, kind: 'square'|'triangle'|'pentagon') => {
+        const count = entitiesRef.current.filter(e => e.kind === kind).length;
+        if (count >= KIND_CAPS[kind]) return;
+        if (spawnsThisFrameRef.current >= MAX_SPAWNS_PER_FRAME) return;
+        if (entsSpawnNear(entitiesRef.current as any, nextEntityIdRef as any, x, y, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, kind)) {
+          spawnsThisFrameRef.current++;
         }
       };
       let tookDamage = false;
       const killedByBody = new Set<number>();
       let bodyRemovedSquares = 0;
       let bodyRemovedTriangles = 0;
+      let bodyRemovedPentagons = 0;
       const onPlayerCollide = (entity: GameEntity, overlapDt: number) => {
         tankHpRef.current = Math.max(0, tankHpRef.current - PLAYER_CONTACT_DPS * overlapDt);
         tankHitTRef.current = HIT_FLASH_DURATION;
@@ -342,6 +361,7 @@ export default function TankShooter() {
           pendingXpRef.current += xpForKill(entity.kind, entity.maxHp);
           pendingScoreRef.current += scoreForKill(entity.kind, entity.maxHp);
           if (entity.kind === "triangle") bodyRemovedTriangles += 1;
+          else if (entity.kind === "pentagon") bodyRemovedPentagons += 1;
           else bodyRemovedSquares += 1;
         }
       };
@@ -357,43 +377,28 @@ export default function TankShooter() {
         onPlayerCollide,
       );
       if (killedByBody.size) {
-        const originalCount = entitiesRef.current.length;
         entitiesRef.current = entitiesRef.current.filter((entity) => !killedByBody.has(entity.id));
-        let spawned = 0;
-        while (bodyRemovedSquares > 0 && spawnsThisFrameRef.current < MAX_SPAWNS_PER_FRAME) {
-          if (entsSpawnRandom(
-            entitiesRef.current as any,
-            nextEntityIdRef as any,
-            tankPosRef.current,
-            MAP_WIDTH,
-            MAP_HEIGHT,
-            SPAWN_SAFE_RADIUS,
-            'square',
-          )) {
-            spawned++;
-            spawnsThisFrameRef.current++;
-            bodyRemovedSquares -= 1;
-          } else {
-            break;
+        const replenish = (count: number, kind: 'square'|'triangle'|'pentagon') => {
+          while (count > 0 && spawnsThisFrameRef.current < MAX_SPAWNS_PER_FRAME) {
+            if (entsSpawnRandom(
+              entitiesRef.current as any,
+              nextEntityIdRef as any,
+              tankPosRef.current,
+              MAP_WIDTH,
+              MAP_HEIGHT,
+              SPAWN_SAFE_RADIUS,
+              kind,
+            )) {
+              spawnsThisFrameRef.current++;
+              count -= 1;
+            } else {
+              break;
+            }
           }
-        }
-        while (bodyRemovedTriangles > 0 && spawnsThisFrameRef.current < MAX_SPAWNS_PER_FRAME) {
-          if (entsSpawnRandom(
-            entitiesRef.current as any,
-            nextEntityIdRef as any,
-            tankPosRef.current,
-            MAP_WIDTH,
-            MAP_HEIGHT,
-            SPAWN_SAFE_RADIUS,
-            'triangle',
-          )) {
-            spawned++;
-            spawnsThisFrameRef.current++;
-            bodyRemovedTriangles -= 1;
-          } else {
-            break;
-          }
-        }
+        };
+        replenish(bodyRemovedSquares, 'square');
+        replenish(bodyRemovedTriangles, 'triangle');
+        replenish(bodyRemovedPentagons, 'pentagon');
       }
       resolveEntityEntityCollisions(entitiesRef.current as any);
       entsDeathUpdate(dt);
@@ -409,6 +414,7 @@ export default function TankShooter() {
         maxSpawnsPerFrame: MAX_SPAWNS_PER_FRAME,
         spawnSquare: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'square'),
         spawnTriangle: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle'),
+        spawnPentagon: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'pentagon'),
         queueDeathEffect: entsQueueDeathFx,
         onEntityKilled: (entity) => {
           pendingXpRef.current += xpForKill(entity.kind, entity.maxHp);
@@ -485,22 +491,47 @@ export default function TankShooter() {
           <span className="hud-text">Lvl {playerProgress.level} Tank</span>
         </div>
       </div>
-      <div id="hud-stats" data-hud="stats" className="hud-stats">
+      <div
+        id="hud-stats"
+        data-hud="stats"
+        className={`hud-stats${availableSkillPoints(playerProgress.level, playerStats) === 0 ? " hud-stats--idle" : ""}`}
+      >
         <div className="hud-stats-wrap">
-          <div className="hud-stats-header">
-            <span>Skill Points</span>
-            <span>{availableSkillPoints(playerProgress.level, playerStats)} / {totalSkillPointsForLevel(playerProgress.level)}</span>
+          <div className="hud-skill-points">
+            x{availableSkillPoints(playerProgress.level, playerStats)}
           </div>
           {STAT_ORDER.map((key, idx) => {
             const value = playerStats[key];
-            const pct = (value / MAX_STAT_POINTS) * 100;
+            const color = STAT_COLORS[key];
+            const maxed = value >= MAX_STAT_POINTS;
+            const fillPct = (value / MAX_STAT_POINTS) * 100;
             return (
-              <div key={key} className="hud-stat-row">
-                <div className="hud-bar">
-                  <div className="hud-bar-label">{STAT_LABELS[key]} [{idx + 1}]</div>
-                  <div className="hud-bar-fill" style={{ width: `${pct}%` }} />
+              <div
+                key={key}
+                className={`hud-stat-row${maxed ? " maxed" : ""}`}
+                style={{
+                  ["--stat-color" as string]: color,
+                  ["--stat-segments" as string]: MAX_STAT_POINTS,
+                }}
+              >
+                <div className="hud-stat-bar">
+                  <div className="hud-stat-track">
+                    <div
+                      className="hud-stat-fill"
+                      style={{ width: `${fillPct}%`, background: color }}
+                    />
+                    <div className="hud-stat-segments">
+                      {Array.from({ length: MAX_STAT_POINTS }, (_, i) => (
+                        <div key={i} className="hud-stat-segment" />
+                      ))}
+                    </div>
+                  </div>
+                  <span className="hud-stat-label">{STAT_LABELS[key]}</span>
+                  <span className="hud-stat-key">[{idx + 1}]</span>
                 </div>
-                <div className="hud-stat-value">{value}/{MAX_STAT_POINTS}</div>
+                <div className="hud-stat-value">
+                  {maxed ? "MAX" : `+${value}`}
+                </div>
               </div>
             );
           })}

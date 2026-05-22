@@ -1,7 +1,7 @@
 // Entity logic and constants
 export interface Vec2 { x: number; y: number }
 
-export type EntityKind = 'square' | 'triangle'
+export type EntityKind = 'square' | 'triangle' | 'pentagon'
 
 export interface GameEntity {
   id: number;
@@ -32,6 +32,13 @@ export const TRIANGLE_STROKE = "#bd5859";
 export const TRIANGLE_SIZE = 43;
 export const TRIANGLE_MAX_COUNT = 5;
 export const TRIANGLE_MAX_HP = 30;
+
+// Pentagons
+export const PENTAGON_FILL = "#768DFC";
+export const PENTAGON_STROKE = "#5869BD";
+export const PENTAGON_SIZE = 56;
+export const PENTAGON_MAX_COUNT = 3;
+export const PENTAGON_MAX_HP = 100;
 
 // Movement
 export const ENTITY_SPEED_MIN = 5;  // px/s
@@ -84,6 +91,53 @@ export function squareWorldVerts(pos: Vec2, angle: number, size: number): [Vec2,
   const ca = Math.cos(angle), sa = Math.sin(angle);
   const rot = (p: Vec2): Vec2 => ({ x: p.x * ca - p.y * sa + pos.x, y: p.x * sa + p.y * ca + pos.y });
   return [rot(local[0]), rot(local[1]), rot(local[2]), rot(local[3])];
+}
+
+export function pentagonWorldVerts(
+  pos: Vec2,
+  angle: number,
+  size: number,
+): [Vec2, Vec2, Vec2, Vec2, Vec2] {
+  const R = Math.max(1, size) / 2;
+  const ca = Math.cos(angle), sa = Math.sin(angle);
+  const verts: Vec2[] = [];
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI * 2) / 5;
+    const lx = Math.cos(a) * R;
+    const ly = Math.sin(a) * R;
+    verts.push({ x: lx * ca - ly * sa + pos.x, y: lx * sa + ly * ca + pos.y });
+  }
+  return [verts[0], verts[1], verts[2], verts[3], verts[4]];
+}
+
+function traceShapePath(
+  ctx: CanvasRenderingContext2D,
+  kind: EntityKind,
+  size: number,
+  halfSize: number,
+): void {
+  if (kind === 'triangle') {
+    const halfSide = size / 2;
+    const height = (size * Math.sqrt(3)) / 2;
+    const topY = - (2 / 3) * height;
+    const baseY = (1 / 3) * height;
+    ctx.moveTo(0, topY);
+    ctx.lineTo(halfSide, baseY);
+    ctx.lineTo(-halfSide, baseY);
+    ctx.closePath();
+  } else if (kind === 'pentagon') {
+    const R = size / 2;
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI * 2) / 5;
+      const x = Math.cos(a) * R;
+      const y = Math.sin(a) * R;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  } else {
+    ctx.rect(-halfSize, -halfSize, size, size);
+  }
 }
 
 function pointInTriangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2): boolean {
@@ -162,6 +216,29 @@ export function circleIntersectsPolygon(center: Vec2, radius: number, verts: Vec
   return (dx * dx + dy * dy) <= radius * radius;
 }
 
+function entityKindStats(kind: EntityKind): {
+  size: number;
+  fill: string;
+  stroke: string;
+  maxHp: number;
+  maxCount: number;
+} {
+  switch (kind) {
+    case 'triangle':
+      return { size: TRIANGLE_SIZE, fill: TRIANGLE_FILL, stroke: TRIANGLE_STROKE, maxHp: TRIANGLE_MAX_HP, maxCount: TRIANGLE_MAX_COUNT };
+    case 'pentagon':
+      return { size: PENTAGON_SIZE, fill: PENTAGON_FILL, stroke: PENTAGON_STROKE, maxHp: PENTAGON_MAX_HP, maxCount: PENTAGON_MAX_COUNT };
+    default:
+      return { size: SQUARE_SIZE, fill: SQUARE_FILL, stroke: SQUARE_STROKE, maxHp: SQUARE_MAX_HP, maxCount: SQUARE_MAX_COUNT };
+  }
+}
+
+function countOfKind(entities: GameEntity[], kind: EntityKind): number {
+  let n = 0;
+  for (const e of entities) if (e.kind === kind) n++;
+  return n;
+}
+
 export function spawnEntityRandomAvoidingPlayers(
   entities: GameEntity[],
   nextEntityIdRef: { current: number },
@@ -171,6 +248,8 @@ export function spawnEntityRandomAvoidingPlayers(
   safeRadius: number,
   kind: EntityKind = 'square',
 ): boolean {
+  const stats = entityKindStats(kind);
+  if (countOfKind(entities, kind) >= stats.maxCount) return false;
   for (let i = 0; i < 20; i++) {
     const x = Math.random() * mapW;
     const y = Math.random() * mapH;
@@ -178,18 +257,9 @@ export function spawnEntityRandomAvoidingPlayers(
     const dy = y - playerPos.y;
     if (dx * dx + dy * dy < safeRadius * safeRadius) continue;
 
-    const countSquare = entities.filter(e => e.kind === 'square').length;
-    const countTri = entities.filter(e => e.kind === 'triangle').length;
-    if (kind === 'square' && countSquare >= SQUARE_MAX_COUNT) return false;
-    if (kind === 'triangle' && countTri >= TRIANGLE_MAX_COUNT) return false;
-
     const speed = ENTITY_SPEED_MIN + Math.random() * (ENTITY_SPEED_MAX - ENTITY_SPEED_MIN);
     const dir = Math.random() * Math.PI * 2;
     const angVel = ENTITY_ANG_MIN + Math.random() * (ENTITY_ANG_MAX - ENTITY_ANG_MIN);
-    const size = kind === 'square' ? SQUARE_SIZE : TRIANGLE_SIZE;
-    const fill = kind === 'square' ? SQUARE_FILL : TRIANGLE_FILL;
-    const stroke = kind === 'square' ? SQUARE_STROKE : TRIANGLE_STROKE;
-    const maxHp = kind === 'square' ? SQUARE_MAX_HP : TRIANGLE_MAX_HP;
     entities.push({
       id: nextEntityIdRef.current++,
       pos: { x, y },
@@ -197,12 +267,12 @@ export function spawnEntityRandomAvoidingPlayers(
       kick: { x: 0, y: 0 },
       angle: Math.random() * Math.PI * 2,
       angVel,
-      size,
+      size: stats.size,
       kind,
-      fill,
-      stroke,
-      hp: maxHp,
-      maxHp,
+      fill: stats.fill,
+      stroke: stats.stroke,
+      hp: stats.maxHp,
+      maxHp: stats.maxHp,
     });
     return true;
   }
@@ -220,6 +290,8 @@ export function spawnEntityNearAvoidingPlayers(
   safeRadius: number,
   kind: EntityKind = 'square',
 ): boolean {
+  const stats = entityKindStats(kind);
+  if (countOfKind(entities, kind) >= stats.maxCount) return false;
   const angle = Math.random() * Math.PI * 2;
   const dist = REPRO_NEAR_MIN + Math.random() * (REPRO_NEAR_MAX - REPRO_NEAR_MIN);
   const x = Math.max(0, Math.min(mapW, baseX + Math.cos(angle) * dist));
@@ -228,18 +300,9 @@ export function spawnEntityNearAvoidingPlayers(
   const dy = y - playerPos.y;
   if (dx * dx + dy * dy < safeRadius * safeRadius) return false;
 
-  const countSquare = entities.filter(e => e.kind === 'square').length;
-  const countTri = entities.filter(e => e.kind === 'triangle').length;
-  if (kind === 'square' && countSquare >= SQUARE_MAX_COUNT) return false;
-  if (kind === 'triangle' && countTri >= TRIANGLE_MAX_COUNT) return false;
-
   const speed = ENTITY_SPEED_MIN + Math.random() * (ENTITY_SPEED_MAX - ENTITY_SPEED_MIN);
   const dir = Math.random() * Math.PI * 2;
   const angVel = ENTITY_ANG_MIN + Math.random() * (ENTITY_ANG_MAX - ENTITY_ANG_MIN);
-  const size = kind === 'square' ? SQUARE_SIZE : TRIANGLE_SIZE;
-  const fill = kind === 'square' ? SQUARE_FILL : TRIANGLE_FILL;
-  const stroke = kind === 'square' ? SQUARE_STROKE : TRIANGLE_STROKE;
-  const maxHp = kind === 'square' ? SQUARE_MAX_HP : TRIANGLE_MAX_HP;
   entities.push({
     id: nextEntityIdRef.current++,
     pos: { x, y },
@@ -247,12 +310,12 @@ export function spawnEntityNearAvoidingPlayers(
     kick: { x: 0, y: 0 },
     angle: Math.random() * Math.PI * 2,
     angVel,
-    size,
+    size: stats.size,
     kind,
-    fill,
-    stroke,
-    hp: maxHp,
-    maxHp,
+    fill: stats.fill,
+    stroke: stats.stroke,
+    hp: stats.maxHp,
+    maxHp: stats.maxHp,
   });
   return true;
 }
@@ -286,6 +349,9 @@ export function updateEntities(
     if (e.kind === 'triangle') {
       const [v0, v1, v2] = triangleWorldVerts(e.pos, e.angle, insetSize);
       verts = [v0, v1, v2];
+    } else if (e.kind === 'pentagon') {
+      const [p0, p1, p2, p3, p4] = pentagonWorldVerts(e.pos, e.angle, insetSize);
+      verts = [p0, p1, p2, p3, p4];
     } else {
       const [r0, r1, r2, r3] = squareWorldVerts(e.pos, e.angle, insetSize);
       verts = [r0, r1, r2, r3];
@@ -347,18 +413,7 @@ export function drawEntities(
     ctx.strokeStyle = e.stroke;
     ctx.lineWidth = 3.5;
     ctx.beginPath();
-    if (e.kind === 'triangle') {
-      const halfSide = s / 2;
-      const height = (s * Math.sqrt(3)) / 2;
-      const topY = - (2 / 3) * height;
-      const baseY = (1 / 3) * height;
-      ctx.moveTo(0, topY);
-      ctx.lineTo(halfSide, baseY);
-      ctx.lineTo(-halfSide, baseY);
-      ctx.closePath();
-    } else {
-      ctx.rect(-hs, -hs, s, s);
-    }
+    traceShapePath(ctx, e.kind, s, hs);
     ctx.fill();
     ctx.stroke();
     ctx.restore();
@@ -376,18 +431,7 @@ export function drawEntities(
       ctx.strokeStyle = HIT_STROKE;
       ctx.lineWidth = 3.5;
       ctx.beginPath();
-      if (e.kind === 'triangle') {
-        const halfSide = s / 2;
-        const height = (s * Math.sqrt(3)) / 2;
-        const topY = - (2 / 3) * height;
-        const baseY = (1 / 3) * height;
-        ctx.moveTo(0, topY);
-        ctx.lineTo(halfSide, baseY);
-        ctx.lineTo(-halfSide, baseY);
-        ctx.closePath();
-      } else {
-        ctx.rect(-hs, -hs, s, s);
-      }
+      traceShapePath(ctx, e.kind, s, hs);
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -494,18 +538,26 @@ export function resolveEntityEntityCollisions(entities: GameEntity[]): void {
   if (N <= 1) return;
   const INSET = 6;
   const BOUNCE = 120; // impulse strength
+  const vertsFor = (e: GameEntity, size: number): Vec2[] => {
+    if (e.kind === 'triangle') {
+      const [v0, v1, v2] = triangleWorldVerts(e.pos, e.angle, size);
+      return [v0, v1, v2];
+    }
+    if (e.kind === 'pentagon') {
+      const [p0, p1, p2, p3, p4] = pentagonWorldVerts(e.pos, e.angle, size);
+      return [p0, p1, p2, p3, p4];
+    }
+    const [r0, r1, r2, r3] = squareWorldVerts(e.pos, e.angle, size);
+    return [r0, r1, r2, r3];
+  };
   for (let i = 0; i < N; i++) {
     const a = entities[i];
     const sizeA = Math.max(1, a.size - INSET);
-    const vertsA = a.kind === 'triangle' ?
-      (() => { const [v0, v1, v2] = triangleWorldVerts(a.pos, a.angle, sizeA); return [v0, v1, v2] as Vec2[] })() :
-      (() => { const [r0, r1, r2, r3] = squareWorldVerts(a.pos, a.angle, sizeA); return [r0, r1, r2, r3] as Vec2[] })();
+    const vertsA = vertsFor(a, sizeA);
     for (let j = i + 1; j < N; j++) {
       const b = entities[j];
       const sizeB = Math.max(1, b.size - INSET);
-      const vertsB = b.kind === 'triangle' ?
-        (() => { const [v0, v1, v2] = triangleWorldVerts(b.pos, b.angle, sizeB); return [v0, v1, v2] as Vec2[] })() :
-        (() => { const [r0, r1, r2, r3] = squareWorldVerts(b.pos, b.angle, sizeB); return [r0, r1, r2, r3] as Vec2[] })();
+      const vertsB = vertsFor(b, sizeB);
 
       const mtv = satMTV(vertsA, vertsB, a.pos.x, a.pos.y, b.pos.x, b.pos.y);
       if (!mtv) continue;
@@ -591,18 +643,7 @@ export function drawDeathEffects(
     ctx.strokeStyle = fx.stroke;
     ctx.lineWidth = 3.5;
     ctx.beginPath();
-    if (fx.kind === 'triangle') {
-      const halfSide = drawSize / 2;
-      const height = (drawSize * Math.sqrt(3)) / 2;
-      const topY = - (2 / 3) * height;
-      const baseY = (1 / 3) * height;
-      ctx.moveTo(0, topY);
-      ctx.lineTo(halfSide, baseY);
-      ctx.lineTo(-halfSide, baseY);
-      ctx.closePath();
-    } else {
-      ctx.rect(-hs, -hs, drawSize, drawSize);
-    }
+    traceShapePath(ctx, fx.kind, drawSize, hs);
     ctx.fill();
     ctx.stroke();
     ctx.restore();
