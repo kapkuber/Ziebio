@@ -54,8 +54,12 @@ export const FOV_SCALE = 0.003;
 
 export const REGEN_BASE_FACTOR = 0.03;
 export const REGEN_PER_POINT = 0.12;
-export const REGEN_HYPER_DELAY = 10; // seconds since last damage
-export const REGEN_HYPER_MULTIPLIER = 4;
+// Hyper-regen kicks in after ~30s without damage (matches diep.io).
+export const REGEN_HYPER_DELAY = 25; // seconds since last damage
+// Hyper-regen adds a flat fraction of maxHp/sec on top of normal regen,
+// independent of Health Regen points — matches diep.io's behavior where
+// even a 0-point tank rapidly heals once hyper-regen triggers.
+export const REGEN_HYPER_FRACTION = 0.1; // +10% maxHp/sec while hyper
 
 export const BODY_DAMAGE_BASE = 5;
 export const BODY_DAMAGE_MULT_SHAPE = 4;
@@ -65,7 +69,7 @@ export const BODY_DAMAGE_MULT_PROJECTILE = 1;
 export const BASE_BULLET_SPEED = 300;
 export const BULLET_SPEED_PER_POINT = 0.1;
 
-export const BASE_BULLET_HP = 2;
+export const BASE_BULLET_HP = 7;
 export const BULLET_PENETRATION_PER_POINT = 0.75;
 
 export const BASE_BULLET_DAMAGE = 7;
@@ -83,14 +87,35 @@ export const MIN_LEVEL_SPEED_MULTIPLIER = 0.6;
 
 export const HIGH_SPEED_DAMAGE_PENALTY = 0.08;
 
-export const IMPACT_SPEED_BONUS = 0.25;
+// Speed-dependent multiplier on per-tick body-damage exchanges.
+//   impact = IMPACT_BASE + (speed / baseSpeed)^IMPACT_SPEED_EXPONENT * IMPACT_SPEED_BONUS
+// IMPACT_BASE sets the floor — even at a standstill, contact still deals
+// meaningful per-tick damage. IMPACT_SPEED_BONUS is the additional ceiling
+// added at full speed. Lower exponents flatten the curve (more linear).
+// With these defaults: standstill ~5×, half-speed ~12.5×, full-speed ~35×.
+export const IMPACT_BASE = 17;
+export const IMPACT_SPEED_BONUS = 30;
+export const IMPACT_SPEED_EXPONENT = 2;
 
 export type ShapeKind = "square" | "triangle" | "pentagon";
 
+// Effective body damage dealt to bullets per hit. Tuned so a base bullet (HP =
+// BASE_BULLET_HP, no penetration points) dies on a single polygon hit — matching
+// diep.io's observed behavior where one base shot kills itself on any polygon.
+// Penetration points scale BASE_BULLET_HP up, letting bullets pass through more.
 export const SHAPE_BASE_DAMAGE: Record<ShapeKind, number> = {
-  square: 2,
-  triangle: 4,
+  square: 7,
+  triangle: 7,
   pentagon: 8,
+};
+
+// Body damage each polygon deals to the player tank on contact (per second of
+// overlap — modulated by collision speed via impactMultiplierFromSpeed).
+// Matches diep.io's displayed body damage values for shapes.
+export const SHAPE_BODY_DAMAGE_TO_TANK: Record<ShapeKind, number> = {
+  square: 8,
+  triangle: 8,
+  pentagon: 12,
 };
 
 export const XP_PER_KILL: Record<ShapeKind, number> = {
@@ -262,7 +287,7 @@ export function computeBulletHitDamage(
 
 export function impactMultiplierFromSpeed(speed: number): number {
   const ratio = Math.max(0, Math.min(1, speed / BASE_TANK_SPEED));
-  return 1 + ratio * IMPACT_SPEED_BONUS;
+  return IMPACT_BASE + Math.pow(ratio, IMPACT_SPEED_EXPONENT) * IMPACT_SPEED_BONUS;
 }
 
 export function xpForKill(kind: ShapeKind, _maxHp: number): number {

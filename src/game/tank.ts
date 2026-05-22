@@ -2,6 +2,8 @@
 export interface Vec2 { x: number; y: number }
 import { HIT_FILL, HIT_STROKE, HIT_FLASH_DURATION } from './entities';
 
+export type BulletOwner = 'player' | 'enemy';
+
 export interface Bullet {
   id: number;
   pos: Vec2;
@@ -11,6 +13,8 @@ export interface Bullet {
   hp: number;
   maxHp: number;
   damage: number;
+  owner: BulletOwner;
+  hitIds: Set<number>;
 }
 
 export const TANK_RADIUS = 24;
@@ -72,6 +76,8 @@ export function spawnBullet(
     hp: stats.hp,
     maxHp: stats.hp,
     damage: stats.damage,
+    owner: 'player',
+    hitIds: new Set(),
   });
   tankVel.x -= dir.x * RECOIL_IMPULSE;
   tankVel.y -= dir.y * RECOIL_IMPULSE;

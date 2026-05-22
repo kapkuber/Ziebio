@@ -52,7 +52,6 @@ export const HIT_FLASH_DURATION = 0.06; // seconds for damage flash (fade in/out
 export const HIT_FILL = '#ff2021';
 export const HIT_STROKE = '#f01717';
 // Player contact damage
-export const PLAYER_CONTACT_DPS = 12; // damage per-second while overlapping
 // Death animation
 export const DEATH_ANIM_DURATION = 0.06; // seconds
 
@@ -377,7 +376,10 @@ export function updateEntities(
       playerVel.y += ny * PLAYER_BOUNCE;
       e.kick.x -= nx * ENTITY_BOUNCE;
       e.kick.y -= ny * ENTITY_BOUNCE;
-      // report contact damage to player (purely via callback)
+      // Report contact damage every collision tick. Diep/arras have no
+      // per-engagement cooldown — damage applies every frame of overlap,
+      // with deathFactor and speed-impact scaling producing the "full-speed
+      // insta-kill" vs "slow takes longer" feel.
       if (onPlayerCollide) onPlayerCollide(e, dt);
     }
 

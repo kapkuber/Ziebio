@@ -5,7 +5,6 @@ import {
   TRIANGLE_MAX_COUNT,
   PENTAGON_MAX_COUNT,
   HIT_FLASH_DURATION,
-  PLAYER_CONTACT_DPS,
   resolveEntityEntityCollisions,
   spawnEntityRandomAvoidingPlayers as entsSpawnRandom,
   spawnEntityNearAvoidingPlayers as entsSpawnNear,
@@ -42,7 +41,7 @@ import {
   MAX_STAT_POINTS,
   MAX_LEVEL,
   REGEN_HYPER_DELAY,
-  REGEN_HYPER_MULTIPLIER,
+  REGEN_HYPER_FRACTION,
   availableSkillPoints,
   baseMaxHpForLevel,
   computeDerivedStats,
@@ -50,6 +49,7 @@ import {
   scoreForKill,
   xpForKill,
   xpForNextLevel,
+  SHAPE_BODY_DAMAGE_TO_TANK,
   type StatKey,
   type StatPoints,
 } from "./game/stats";
@@ -92,7 +92,17 @@ export default function TankShooter() {
   const bulletsRef = useRef<Bullet[]>([]);
   const bulletIdRef = useRef(1);
   const lastTsRef = useRef<number | null>(null);
-  const tankPosRef = useRef<Vec2>({ x: 0, y: 0 }); // player's WORLD position
+  // Pick a random world position for the tank, kept some margin away from the
+  // map edges. Entity seeding (below) uses this position with SPAWN_SAFE_RADIUS,
+  // so entities will avoid spawning on top of the player.
+  const initialTankPos = (() => {
+    const margin = 4 * GRID_SIZE;
+    return {
+      x: margin + Math.random() * (MAP_WIDTH - 2 * margin),
+      y: margin + Math.random() * (MAP_HEIGHT - 2 * margin),
+    };
+  })();
+  const tankPosRef = useRef<Vec2>(initialTankPos); // player's WORLD position
   const tankVelRef = useRef<Vec2>({ x: 0, y: 0 }); // player's WORLD velocity
   const tankHpRef = useRef<number>(baseMaxHpForLevel(1));
   const tankHitTRef = useRef<number>(0);
@@ -109,28 +119,34 @@ export default function TankShooter() {
   const pendingXpRef = useRef<number>(0);
   const pendingScoreRef = useRef<number>(0);
   const timeSinceDamageRef = useRef<number>(0);
+  // Visually-lagged HP — lerps toward tankHpRef each frame so the health
+  // bar slides smoothly instead of snapping on each damage/regen tick.
+  const tankDisplayHpRef = useRef<number>(baseMaxHpForLevel(1));
 
   const [playerStats, setPlayerStats] = useState<StatPoints>({ ...INITIAL_STATS });
   const [playerProgress, setPlayerProgress] = useState({ level: 1, xp: 0 });
   const [score, setScore] = useState(0);
 
-  // Seed a few entities on mount so something draws immediately
+  // Seed a few entities on mount so something draws immediately.
+  // Pass the actual tankPosRef so spawn placement respects SPAWN_SAFE_RADIUS
+  // around the player's randomly-chosen start position.
   useEffect(() => {
+    const playerPos = tankPosRef.current;
     let seeds = 0;
     while (seeds < 6) {
-      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, { x: MAP_WIDTH/2, y: MAP_HEIGHT/2 }, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'square')) {
+      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, playerPos, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'square')) {
         seeds++;
       } else break;
     }
     let tris = 0;
     while (tris < 2) {
-      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, { x: MAP_WIDTH/2, y: MAP_HEIGHT/2 }, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle')) {
+      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, playerPos, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle')) {
         tris++;
       } else break;
     }
     let pents = 0;
     while (pents < PENTAGON_MAX_COUNT) {
-      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, { x: MAP_WIDTH/2, y: MAP_HEIGHT/2 }, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'pentagon')) {
+      if (entsSpawnRandom(entitiesRef.current as any, nextEntityIdRef as any, playerPos, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'pentagon')) {
         pents++;
       } else break;
     }
@@ -346,14 +362,35 @@ export default function TankShooter() {
       let bodyRemovedTriangles = 0;
       let bodyRemovedPentagons = 0;
       const onPlayerCollide = (entity: GameEntity, overlapDt: number) => {
-        tankHpRef.current = Math.max(0, tankHpRef.current - PLAYER_CONTACT_DPS * overlapDt);
+        // Per-tick body-damage exchange (matches diep/arras — no cooldown,
+        // damage applies every frame of overlap). deathFactor scales the
+        // dying side's reciprocal damage so insta-killing a low-HP polygon
+        // only costs you a sliver of HP. The IMPACT_SPEED_BONUS scaling
+        // makes full-speed rams resolve in 1-2 ticks, while slow contact
+        // accrues damage gradually across many ticks.
+        const speed = Math.hypot(tankVelRef.current.x, tankVelRef.current.y);
+        const impact = impactMultiplierFromSpeed(speed);
+
+        const proposedToEntity = derived.bodyDamageShape * impact * overlapDt;
+        const proposedToTank = (SHAPE_BODY_DAMAGE_TO_TANK[entity.kind] ?? 0) * impact * overlapDt;
+
+        const entityDeathFactor =
+          proposedToEntity > 0 && proposedToEntity > entity.hp
+            ? entity.hp / proposedToEntity
+            : 1;
+        const tankDeathFactor =
+          proposedToTank > 0 && proposedToTank > tankHpRef.current
+            ? tankHpRef.current / proposedToTank
+            : 1;
+
+        const actualToEntity = proposedToEntity * tankDeathFactor;
+        const actualToTank = proposedToTank * entityDeathFactor;
+
+        tankHpRef.current = Math.max(0, tankHpRef.current - actualToTank);
         tankHitTRef.current = HIT_FLASH_DURATION;
         tookDamage = true;
 
-        const speed = Math.hypot(tankVelRef.current.x, tankVelRef.current.y);
-        const impact = impactMultiplierFromSpeed(speed);
-        const bodyDamage = derived.bodyDamageShape * impact * overlapDt;
-        entity.hp = Math.max(0, entity.hp - bodyDamage);
+        entity.hp = Math.max(0, entity.hp - actualToEntity);
         entity.hitT = HIT_FLASH_DURATION;
         if (entity.hp <= 0) {
           killedByBody.add(entity.id);
@@ -435,13 +472,22 @@ export default function TankShooter() {
         timeSinceDamageRef.current += dt;
         if (timeSinceDamageRef.current > 0) {
           const isHyper = timeSinceDamageRef.current >= REGEN_HYPER_DELAY;
-          const regen = derived.regenPerSecond * (isHyper ? REGEN_HYPER_MULTIPLIER : 1);
+          const hyperBonus = isHyper ? derived.maxHp * REGEN_HYPER_FRACTION : 0;
+          const regen = derived.regenPerSecond + hyperBonus;
           tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current + regen * dt);
         }
       }
       tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current);
 
-      tankDrawHp(ctx, camera.width, camera.height, tankHpRef.current, derived.maxHp, tankRadius);
+      // Lerp the displayed HP toward the real HP so the bar slides smoothly.
+      // alpha = 1 - exp(-rate * dt) gives framerate-independent exponential
+      // easing; HP_LERP_RATE ≈ 10 means ~half the gap closes every ~70 ms.
+      const HP_LERP_RATE = 10;
+      const alpha = 1 - Math.exp(-HP_LERP_RATE * dt);
+      tankDisplayHpRef.current +=
+        (tankHpRef.current - tankDisplayHpRef.current) * alpha;
+
+      tankDrawHp(ctx, camera.width, camera.height, tankDisplayHpRef.current, derived.maxHp, tankRadius);
       // red tank flash overlay
       tankDrawHit(ctx, camera.width, camera.height, tankHitTRef.current, tankRadius);
       // screen flash removed per request; only tank flash remains

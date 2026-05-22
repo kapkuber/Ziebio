@@ -9,7 +9,7 @@ export const OUTSIDE_LINE_COLOR = "#adadad"; // grid lines (outside map)
 export const MAP_WIDTH = 1500;
 export const MAP_HEIGHT = 1500;
 
-export const SPAWN_SAFE_RADIUS = 20 * GRID_SIZE; // no-spawn radius around player
+export const SPAWN_SAFE_RADIUS = 10 * GRID_SIZE; // no-spawn radius around player
 export const MAX_SPAWNS_PER_FRAME = 2;
 
 export interface CameraInfo {

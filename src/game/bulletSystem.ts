@@ -96,6 +96,7 @@ export function updateBullets({
           if (!bucket) continue;
           for (const entity of bucket) {
             if (removed.has(entity.id)) continue;
+            if (bullet.hitIds.has(entity.id)) continue;
             const applyHit = (baseDamage: number, dxh: number, dyh: number, kickSign: 1 | -1) => {
               const actualDamage = computeBulletHitDamage(bullet.damage, bullet.hp, baseDamage);
               (entity as any).hp = Math.max(0, (entity as any).hp - actualDamage);
@@ -104,6 +105,7 @@ export function updateBullets({
               (entity as any).kick.x += kickSign * (dxh / len) * ENTITY_BOUNCE;
               (entity as any).kick.y += kickSign * (dyh / len) * ENTITY_BOUNCE;
               bullet.hp -= baseDamage;
+              bullet.hitIds.add(entity.id);
               if (bullet.hp <= 0) bullet.life = 0;
               if ((entity as any).hp <= 0) {
                 queueDeathEffect(entity);
@@ -171,6 +173,41 @@ export function updateBullets({
         } else {
           break;
         }
+      }
+    }
+  }
+
+  // Bullet-vs-bullet collisions (HP-swap model)
+  // Each bullet reduces the other's hp by the other's pre-collision hp.
+  // Equal hp -> both destroyed. Higher hp survives with the difference.
+  // Bullets with the same owner pass through each other (friendly fire off).
+  if (bullets.length > 1) {
+    for (let i = 0; i < bullets.length; i++) {
+      const a = bullets[i];
+      if (a.life <= 0) continue;
+      for (let j = i + 1; j < bullets.length; j++) {
+        const b = bullets[j];
+        if (b.life <= 0) continue;
+        if (a.owner === b.owner) continue;
+        const dx = a.pos.x - b.pos.x;
+        const dy = a.pos.y - b.pos.y;
+        const r = a.radius + b.radius;
+        if (dx * dx + dy * dy > r * r) continue;
+        const aHp = a.hp;
+        const bHp = b.hp;
+        a.hp -= bHp;
+        b.hp -= aHp;
+        if (a.hp <= 0) a.life = 0;
+        if (b.hp <= 0) b.life = 0;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = dx / len;
+        const ny = dy / len;
+        const KNOCK = 60;
+        a.vel.x += nx * KNOCK;
+        a.vel.y += ny * KNOCK;
+        b.vel.x -= nx * KNOCK;
+        b.vel.y -= ny * KNOCK;
+        if (a.life <= 0) break;
       }
     }
   }
