@@ -122,10 +122,19 @@ export default function TankShooter() {
   // Visually-lagged HP — lerps toward tankHpRef each frame so the health
   // bar slides smoothly instead of snapping on each damage/regen tick.
   const tankDisplayHpRef = useRef<number>(baseMaxHpForLevel(1));
+  // Camera zoom modifier driven by death state: eases toward 1/1.5 ≈ 0.667
+  // when dead (1.5× zoom-out from the death position) and back to 1 on
+  // respawn. Multiplied into the normal stat-derived zoom each frame.
+  const deathZoomRef = useRef<number>(1);
 
   const [playerStats, setPlayerStats] = useState<StatPoints>({ ...INITIAL_STATS });
   const [playerProgress, setPlayerProgress] = useState({ level: 1, xp: 0 });
   const [score, setScore] = useState(0);
+  // Alive flag is a ref for the frame loop (no re-render needed), and a
+  // mirror state to drive the death overlay UI.
+  const aliveRef = useRef(true);
+  const [isDead, setIsDead] = useState(false);
+  const [deathInfo, setDeathInfo] = useState<{ level: number; score: number } | null>(null);
 
   // Seed a few entities on mount so something draws immediately.
   // Pass the actual tankPosRef so spawn placement respects SPAWN_SAFE_RADIUS
@@ -152,6 +161,7 @@ export default function TankShooter() {
     }
   }, []);
   function spawnBullet() {
+    if (!aliveRef.current) return;
     const tank = tankPosRef.current;
     const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
     const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
@@ -303,39 +313,55 @@ export default function TankShooter() {
       const dt = last ? Math.min((ts - last) / 1000, 0.05) : 0; // clamp to avoid huge jumps
       spawnsThisFrameRef.current = 0;
 
-      // movement from WASD (world space) with drift/inertia
+      const alive = aliveRef.current;
+      // movement from WASD (world space) with drift/inertia — gated on alive
       let ix = 0;
       let iy = 0;
-      const keys = keysRef.current;
-      if (keys.has('w')) iy -= 1;
-      if (keys.has('s')) iy += 1;
-      if (keys.has('a')) ix -= 1;
-      if (keys.has('d')) ix += 1;
+      if (alive) {
+        const keys = keysRef.current;
+        if (keys.has('w')) iy -= 1;
+        if (keys.has('s')) iy += 1;
+        if (keys.has('a')) ix -= 1;
+        if (keys.has('d')) ix += 1;
+      }
       const margin = 4 * GRID_SIZE;
       const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
       const sizeMultiplier = derived.sizeMultiplier;
       const tankRadius = TANK_RADIUS * sizeMultiplier;
       const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-      const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
+      // Ease the death-zoom modifier toward its target (1 alive, 1/1.5 dead).
+      // ZOOM_EASE_RATE ≈ 3 closes ~95% of the gap in ~1 s, framerate-independent.
+      const ZOOM_EASE_RATE = 3;
+      const targetDeathZoom = alive ? 1 : 1 / 1.2;
+      const zoomAlpha = 1 - Math.exp(-ZOOM_EASE_RATE * dt);
+      deathZoomRef.current +=
+        (targetDeathZoom - deathZoomRef.current) * zoomAlpha;
+      const zoom = (1 / Math.max(0.6, derived.fovMultiplier)) * deathZoomRef.current;
       ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
-      integrateTank(
-        dt,
-        ix,
-        iy,
-        tankVelRef.current,
-        tankPosRef.current,
-        MAP_WIDTH,
-        MAP_HEIGHT,
-        margin,
-        derived.moveSpeed,
-      );
+      if (alive) {
+        integrateTank(
+          dt,
+          ix,
+          iy,
+          tankVelRef.current,
+          tankPosRef.current,
+          MAP_WIDTH,
+          MAP_HEIGHT,
+          margin,
+          derived.moveSpeed,
+        );
+      } else {
+        // While dead, drag velocity to a halt so camera doesn't keep drifting.
+        tankVelRef.current.x *= 0.85;
+        tankVelRef.current.y *= 0.85;
+      }
 
       // Tick down global cooldown
       cooldownRemainingRef.current = Math.max(0, cooldownRemainingRef.current - dt);
       // Tick down tank damage flash timer before collision step (so new hits start fresh)
       tankHitTRef.current = Math.max(0, tankHitTRef.current - dt);
       // Continuous fire handling with cooldown (max 1 per 0.6s)
-      if (mouseDownRef.current && cooldownRemainingRef.current <= 0) {
+      if (alive && mouseDownRef.current && cooldownRemainingRef.current <= 0) {
         spawnBullet();
         cooldownRemainingRef.current = derived.reloadSeconds;
       }
@@ -362,6 +388,8 @@ export default function TankShooter() {
       let bodyRemovedTriangles = 0;
       let bodyRemovedPentagons = 0;
       const onPlayerCollide = (entity: GameEntity, overlapDt: number) => {
+        // Dead tank can't damage or take damage from polygons.
+        if (!aliveRef.current) return;
         // Per-tick body-damage exchange (matches diep/arras — no cooldown,
         // damage applies every frame of overlap). deathFactor scales the
         // dying side's reciprocal damage so insta-killing a low-HP polygon
@@ -465,31 +493,44 @@ export default function TankShooter() {
 
       renderBullets(ctx, bulletsRef.current, camera);
       const mouseWorld = { x: mouseRef.current.x / zoom, y: mouseRef.current.y / zoom };
-      tankDraw(ctx, camera.width, camera.height, mouseWorld, sizeMultiplier);
-      if (tookDamage) {
-        timeSinceDamageRef.current = 0;
-      } else {
-        timeSinceDamageRef.current += dt;
-        if (timeSinceDamageRef.current > 0) {
-          const isHyper = timeSinceDamageRef.current >= REGEN_HYPER_DELAY;
-          const hyperBonus = isHyper ? derived.maxHp * REGEN_HYPER_FRACTION : 0;
-          const regen = derived.regenPerSecond + hyperBonus;
-          tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current + regen * dt);
+      if (alive) {
+        tankDraw(ctx, camera.width, camera.height, mouseWorld, sizeMultiplier);
+        if (tookDamage) {
+          timeSinceDamageRef.current = 0;
+        } else {
+          timeSinceDamageRef.current += dt;
+          if (timeSinceDamageRef.current > 0) {
+            const isHyper = timeSinceDamageRef.current >= REGEN_HYPER_DELAY;
+            const hyperBonus = isHyper ? derived.maxHp * REGEN_HYPER_FRACTION : 0;
+            const regen = derived.regenPerSecond + hyperBonus;
+            tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current + regen * dt);
+          }
         }
+        tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current);
+
+        // Death trigger — fires once when HP first reaches 0.
+        if (tankHpRef.current <= 0) {
+          aliveRef.current = false;
+          tankHpRef.current = 0;
+          // Capture final state for the respawn overlay.
+          const finalLevel = playerProgressRef.current.level;
+          const finalScore = score + pendingScoreRef.current;
+          setDeathInfo({ level: finalLevel, score: finalScore });
+          setIsDead(true);
+        }
+
+        // Lerp the displayed HP toward the real HP so the bar slides smoothly.
+        // alpha = 1 - exp(-rate * dt) gives framerate-independent exponential
+        // easing; HP_LERP_RATE ≈ 10 means ~half the gap closes every ~70 ms.
+        const HP_LERP_RATE = 10;
+        const alpha = 1 - Math.exp(-HP_LERP_RATE * dt);
+        tankDisplayHpRef.current +=
+          (tankHpRef.current - tankDisplayHpRef.current) * alpha;
+
+        tankDrawHp(ctx, camera.width, camera.height, tankDisplayHpRef.current, derived.maxHp, tankRadius);
+        // red tank flash overlay
+        tankDrawHit(ctx, camera.width, camera.height, tankHitTRef.current, tankRadius);
       }
-      tankHpRef.current = Math.min(derived.maxHp, tankHpRef.current);
-
-      // Lerp the displayed HP toward the real HP so the bar slides smoothly.
-      // alpha = 1 - exp(-rate * dt) gives framerate-independent exponential
-      // easing; HP_LERP_RATE ≈ 10 means ~half the gap closes every ~70 ms.
-      const HP_LERP_RATE = 10;
-      const alpha = 1 - Math.exp(-HP_LERP_RATE * dt);
-      tankDisplayHpRef.current +=
-        (tankHpRef.current - tankDisplayHpRef.current) * alpha;
-
-      tankDrawHp(ctx, camera.width, camera.height, tankDisplayHpRef.current, derived.maxHp, tankRadius);
-      // red tank flash overlay
-      tankDrawHit(ctx, camera.width, camera.height, tankHitTRef.current, tankRadius);
       // screen flash removed per request; only tank flash remains
       if (pendingXpRef.current > 0 && playerProgressRef.current.level < MAX_LEVEL) {
         let xp = playerProgressRef.current.xp + pendingXpRef.current;
@@ -517,6 +558,40 @@ export default function TankShooter() {
     const raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
   }, []);
+
+  const handleRespawn = () => {
+    const deathLevel = playerProgressRef.current.level;
+    const newLevel = Math.max(1, Math.floor(deathLevel / 2));
+    const newStats = { ...INITIAL_STATS };
+    // Pick a fresh random spawn position.
+    const margin = 4 * GRID_SIZE;
+    tankPosRef.current = {
+      x: margin + Math.random() * (MAP_WIDTH - 2 * margin),
+      y: margin + Math.random() * (MAP_HEIGHT - 2 * margin),
+    };
+    tankVelRef.current = { x: 0, y: 0 };
+    // Reset progression and stats.
+    playerProgressRef.current = { level: newLevel, xp: 0 };
+    setPlayerProgress({ level: newLevel, xp: 0 });
+    playerStatsRef.current = newStats;
+    setPlayerStats(newStats);
+    // Restore HP to the new level's max.
+    const newMaxHp = baseMaxHpForLevel(newLevel);
+    tankHpRef.current = newMaxHp;
+    tankDisplayHpRef.current = newMaxHp;
+    tankHitTRef.current = 0;
+    timeSinceDamageRef.current = 0;
+    pendingXpRef.current = 0;
+    pendingScoreRef.current = 0;
+    // Clear bullets so old shots don't linger.
+    bulletsRef.current = [];
+    // Reset score for the new life.
+    setScore(0);
+    // Hide overlay and resume play.
+    setIsDead(false);
+    setDeathInfo(null);
+    aliveRef.current = true;
+  };
 
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
@@ -583,6 +658,32 @@ export default function TankShooter() {
           })}
         </div>
       </div>
+      {isDead && deathInfo && (
+        <div className="death-overlay">
+          <div className="death-panel">
+            <h1 className="death-title">You Died</h1>
+            <div className="death-stats">
+              <div className="death-stat-row">
+                <span className="death-stat-label">Score</span>
+                <span className="death-stat-value">{deathInfo.score}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Level Reached</span>
+                <span className="death-stat-value">{deathInfo.level}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Respawn Level</span>
+                <span className="death-stat-value">
+                  {Math.max(1, Math.floor(deathInfo.level / 2))}
+                </span>
+              </div>
+            </div>
+            <button className="death-respawn-btn" onClick={handleRespawn}>
+              Respawn
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
