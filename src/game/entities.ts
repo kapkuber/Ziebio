@@ -1,4 +1,6 @@
 // Entity logic and constants
+import { MAP_AREA_SCALE } from './config';
+
 export interface Vec2 { x: number; y: number }
 
 export type EntityKind = 'square' | 'triangle' | 'pentagon'
@@ -19,25 +21,29 @@ export interface GameEntity {
   hitT?: number;
 }
 
+// Population caps scale with map area so density stays constant as the map
+// grows. Bump the base counts below to tune overall density.
+const scaleCount = (base: number) => Math.max(1, Math.round(base * MAP_AREA_SCALE));
+
 // Squares
 export const SQUARE_FILL = "#ffe869";
 export const SQUARE_STROKE = "#bfae4e";
 export const SQUARE_SIZE = 38; // px (square)
-export const SQUARE_MAX_COUNT = 18;
+export const SQUARE_MAX_COUNT = scaleCount(18);
 export const SQUARE_MAX_HP = 10;
 
 // Triangles
 export const TRIANGLE_FILL = "#fc7677";
 export const TRIANGLE_STROKE = "#bd5859";
 export const TRIANGLE_SIZE = 43;
-export const TRIANGLE_MAX_COUNT = 5;
+export const TRIANGLE_MAX_COUNT = scaleCount(5);
 export const TRIANGLE_MAX_HP = 30;
 
 // Pentagons
 export const PENTAGON_FILL = "#768DFC";
 export const PENTAGON_STROKE = "#5869BD";
 export const PENTAGON_SIZE = 56;
-export const PENTAGON_MAX_COUNT = 3;
+export const PENTAGON_MAX_COUNT = scaleCount(3);
 export const PENTAGON_MAX_HP = 100;
 
 // Movement
@@ -535,6 +541,17 @@ function satMTV(vertsA: Vec2[], vertsB: Vec2[], centerAX: number, centerAY: numb
   return { x: mtvAxis.x * minOverlap, y: mtvAxis.y * minOverlap };
 }
 
+// Cell size for the spatial hash. Sized to comfortably exceed the largest
+// entity diameter (pentagon ≈ 56) so each entity occupies at most ~4 cells,
+// keeping bucket sizes small and candidate sets near-constant.
+const COLLISION_CELL_SIZE = 64;
+// Offset and stride for packing (cx, cy) into a single Map key. OFFSET covers
+// any plausible negative cell index from mid-step position nudges; STRIDE is
+// large enough that (cx + OFFSET) * STRIDE never collides with (cy + OFFSET)
+// at any sane map size, and the product stays well under Number.MAX_SAFE_INTEGER.
+const COLLISION_CELL_OFFSET = 1 << 15;
+const COLLISION_CELL_STRIDE = 1 << 16;
+
 export function resolveEntityEntityCollisions(entities: GameEntity[]): void {
   const N = entities.length;
   if (N <= 1) return;
@@ -552,28 +569,86 @@ export function resolveEntityEntityCollisions(entities: GameEntity[]): void {
     const [r0, r1, r2, r3] = squareWorldVerts(e.pos, e.angle, size);
     return [r0, r1, r2, r3];
   };
-  for (let i = 0; i < N; i++) {
-    const a = entities[i];
-    const sizeA = Math.max(1, a.size - INSET);
-    const vertsA = vertsFor(a, sizeA);
-    for (let j = i + 1; j < N; j++) {
-      const b = entities[j];
-      const sizeB = Math.max(1, b.size - INSET);
-      const vertsB = vertsFor(b, sizeB);
 
-      const mtv = satMTV(vertsA, vertsB, a.pos.x, a.pos.y, b.pos.x, b.pos.y);
-      if (!mtv) continue;
-      // separate half along mtv
-      a.pos.x -= mtv.x * 0.5;
-      a.pos.y -= mtv.y * 0.5;
-      b.pos.x += mtv.x * 0.5;
-      b.pos.y += mtv.y * 0.5;
-      // apply bounce impulses along separation axis
-      const n = normalize(mtv);
-      a.kick.x -= n.x * BOUNCE;
-      a.kick.y -= n.y * BOUNCE;
-      b.kick.x += n.x * BOUNCE;
-      b.kick.y += n.y * BOUNCE;
+  // Build the spatial hash: each entity is inserted into every cell its
+  // bounding box overlaps. Two entities can only collide if they share at
+  // least one cell, so we only run SAT against entities in shared buckets.
+  const buckets = new Map<number, number[]>();
+  const cellKey = (cx: number, cy: number) =>
+    (cx + COLLISION_CELL_OFFSET) * COLLISION_CELL_STRIDE + (cy + COLLISION_CELL_OFFSET);
+
+  for (let i = 0; i < N; i++) {
+    const e = entities[i];
+    const r = e.size * 0.5 + 2;
+    const minX = Math.floor((e.pos.x - r) / COLLISION_CELL_SIZE);
+    const maxX = Math.floor((e.pos.x + r) / COLLISION_CELL_SIZE);
+    const minY = Math.floor((e.pos.y - r) / COLLISION_CELL_SIZE);
+    const maxY = Math.floor((e.pos.y + r) / COLLISION_CELL_SIZE);
+    for (let cy = minY; cy <= maxY; cy++) {
+      for (let cx = minX; cx <= maxX; cx++) {
+        const key = cellKey(cx, cy);
+        let bucket = buckets.get(key);
+        if (!bucket) {
+          bucket = [];
+          buckets.set(key, bucket);
+        }
+        bucket.push(i);
+      }
+    }
+  }
+
+  // Lazy verts cache — an entity in K cells would otherwise have its polygon
+  // rebuilt K times. Compute on first use and reuse for the rest of the frame.
+  const vertsCache: (Vec2[] | null)[] = new Array(N).fill(null);
+  const getVerts = (idx: number): Vec2[] => {
+    const cached = vertsCache[idx];
+    if (cached) return cached;
+    const e = entities[idx];
+    const v = vertsFor(e, Math.max(1, e.size - INSET));
+    vertsCache[idx] = v;
+    return v;
+  };
+
+  // Pair dedup — an entity pair sharing two cells would otherwise be checked
+  // twice. Pack (lo, hi) into a single number so we don't allocate strings.
+  const seenPairs = new Set<number>();
+
+  for (const bucket of buckets.values()) {
+    const len = bucket.length;
+    if (len < 2) continue;
+    for (let a = 0; a < len; a++) {
+      const i = bucket[a];
+      for (let b = a + 1; b < len; b++) {
+        const j = bucket[b];
+        const lo = i < j ? i : j;
+        const hi = i < j ? j : i;
+        const pairKey = lo * N + hi;
+        if (seenPairs.has(pairKey)) continue;
+        seenPairs.add(pairKey);
+
+        const eA = entities[lo];
+        const eB = entities[hi];
+        // Bounding-circle reject — sharing a cell doesn't mean overlapping.
+        // This skips most non-colliding pairs without touching SAT.
+        const dx = eA.pos.x - eB.pos.x;
+        const dy = eA.pos.y - eB.pos.y;
+        const reach = (eA.size + eB.size) * 0.5;
+        if (dx * dx + dy * dy > reach * reach) continue;
+
+        const mtv = satMTV(getVerts(lo), getVerts(hi), eA.pos.x, eA.pos.y, eB.pos.x, eB.pos.y);
+        if (!mtv) continue;
+        // separate half along mtv
+        eA.pos.x -= mtv.x * 0.5;
+        eA.pos.y -= mtv.y * 0.5;
+        eB.pos.x += mtv.x * 0.5;
+        eB.pos.y += mtv.y * 0.5;
+        // apply bounce impulses along separation axis
+        const n = normalize(mtv);
+        eA.kick.x -= n.x * BOUNCE;
+        eA.kick.y -= n.y * BOUNCE;
+        eB.kick.x += n.x * BOUNCE;
+        eB.kick.y += n.y * BOUNCE;
+      }
     }
   }
 }
