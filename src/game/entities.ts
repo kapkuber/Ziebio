@@ -36,14 +36,14 @@ export const SQUARE_MAX_HP = 10;
 export const TRIANGLE_FILL = "#fc7677";
 export const TRIANGLE_STROKE = "#bd5859";
 export const TRIANGLE_SIZE = 43;
-export const TRIANGLE_MAX_COUNT = scaleCount(5);
+export const TRIANGLE_MAX_COUNT = scaleCount(6);
 export const TRIANGLE_MAX_HP = 30;
 
 // Pentagons
 export const PENTAGON_FILL = "#768DFC";
 export const PENTAGON_STROKE = "#5869BD";
 export const PENTAGON_SIZE = 56;
-export const PENTAGON_MAX_COUNT = scaleCount(3);
+export const PENTAGON_MAX_COUNT = scaleCount(2);
 export const PENTAGON_MAX_HP = 100;
 
 // Movement

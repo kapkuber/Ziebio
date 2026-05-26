@@ -6,8 +6,8 @@ export const GRID_LINE_COLOR = "#c4c4c4"; // grid lines (inside map)
 export const OUTSIDE_BG_COLOR = "#b7b7b7"; // grid background (outside map)
 export const OUTSIDE_LINE_COLOR = "#adadad"; // grid lines (outside map)
 
-export const MAP_WIDTH = 1500;
-export const MAP_HEIGHT = 1500;
+export const MAP_WIDTH = 3000;
+export const MAP_HEIGHT = 3000;
 
 // Reference area the entity counts and per-frame spawn budget were tuned
 // against. MAP_AREA_SCALE === 1 at 1500×1500; grows linearly with map area so
