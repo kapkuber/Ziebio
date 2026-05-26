@@ -11,12 +11,12 @@ export const CORE_MAX_HP = 1000;
 
 // Center-to-center spacing required between any two cores. Picked so two
 // cores can never share placement footprints with a comfortable buffer.
-export const CORE_MIN_SEPARATION = CORE_SIZE * 5;
+export const CORE_MIN_SEPARATION = CORE_SIZE * 15;
 
 // Lvl 1 structural palette. The diamond accent is NOT defined here — it
 // comes from the owning team's palette (see ./teams.ts) so red-team cores
 // get red accents, green-team cores get green accents, etc.
-export const CORE_PLATE_FILL = '#a1a3a6';
+export const CORE_PLATE_FILL = '#909295';
 export const CORE_OUTLINE = '#575757';
 const CORE_OUTLINE_WIDTH = 3; // slightly thinner than polygons; structures read as static
 
@@ -256,9 +256,52 @@ export function drawCore(
   ctx.fill();
   ctx.stroke();
 
-  // Inner diamond — the identifying accent mark
+  // === Corner panels ===
+  // 4 hexagonal panels with one chamfered outer corner each. Each hugs a
+  // plate corner and wraps around the closest two diamond edges, leaving
+  // small gaps along the cardinal axes for directional arrows.
   const diamondR = core.size * 0.34;
+  const platePad = core.size * 0.05;     // panel inset from the plate outline
+  const axisGap = core.size * 0.07;      // gap from the central X/Y axes
+  const outerChamfer = core.size * 0.12; // chamfer at the panel's outer plate-corner
+  const innerOff = core.size * 0.06;     // gap from the diamond's edge
+  const dxIn = diamondR + innerOff * Math.SQRT2;
+
+  // TR panel vertices (clockwise, all in the +x, -y quadrant).
+  // Mirror across each axis to produce the other three quadrants.
+  const panelVertsTR: [number, number][] = [
+    [axisGap, -half + platePad],                              // top edge, near central axis
+    [half - platePad - outerChamfer, -half + platePad],       // top edge, before outer chamfer
+    [half - platePad, -half + platePad + outerChamfer],       // after outer chamfer
+    [half - platePad, -axisGap],                              // right edge, near central axis
+    [dxIn - axisGap, -axisGap],                               // inner-bottom (corner of L)
+    [axisGap, axisGap - dxIn],                                // inner-top (end of diagonal)
+  ];
+  const panels: [number, number][][] = [
+    panelVertsTR,
+    panelVertsTR.map(([x, y]) => [-x, y] as [number, number]),   // TL
+    panelVertsTR.map(([x, y]) => [-x, -y] as [number, number]),  // BL
+    panelVertsTR.map(([x, y]) => [x, -y] as [number, number]),   // BR
+  ];
+
+  ctx.fillStyle = '#a1a3a6';
+  ctx.strokeStyle = CORE_OUTLINE;
+  ctx.lineWidth = 2;
+  for (const verts of panels) {
+    ctx.beginPath();
+    ctx.moveTo(verts[0][0], verts[0][1]);
+    for (let i = 1; i < verts.length; i++) {
+      ctx.lineTo(verts[i][0], verts[i][1]);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // Inner diamond — the identifying accent mark
   ctx.fillStyle = accentFill;
+  ctx.strokeStyle = CORE_OUTLINE;
+  ctx.lineWidth = CORE_OUTLINE_WIDTH;
   ctx.beginPath();
   ctx.moveTo(0, -diamondR);
   ctx.lineTo(diamondR, 0);
@@ -267,6 +310,32 @@ export function drawCore(
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+
+  // === Directional arrows ===
+  // Small filled triangles in the gap between each diamond vertex and the
+  // plate edge, pointing outward along the cardinal axis.
+  const arrowDist = (half + diamondR) / 2;
+  const arrowLen = core.size * 0.07;
+  const arrowHalfBase = core.size * 0.035;
+  const drawArrow = (cx: number, cy: number, dx: number, dy: number) => {
+    const tipX = cx + dx * arrowLen * 0.5;
+    const tipY = cy + dy * arrowLen * 0.5;
+    const baseCX = cx - dx * arrowLen * 0.5;
+    const baseCY = cy - dy * arrowLen * 0.5;
+    const px = -dy;
+    const py = dx;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(baseCX + px * arrowHalfBase, baseCY + py * arrowHalfBase);
+    ctx.lineTo(baseCX - px * arrowHalfBase, baseCY - py * arrowHalfBase);
+    ctx.closePath();
+    ctx.fill();
+  };
+  ctx.fillStyle = CORE_OUTLINE;
+  drawArrow(0, -arrowDist, 0, -1); // top
+  drawArrow(arrowDist, 0, 1, 0);    // right
+  drawArrow(0, arrowDist, 0, 1);    // bottom
+  drawArrow(-arrowDist, 0, -1, 0);  // left
 
   ctx.restore();
 

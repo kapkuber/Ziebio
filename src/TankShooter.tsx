@@ -142,10 +142,12 @@ export default function TankShooter() {
   // state mirrors its length so the HUD/overlay can react to placements.
   const coresRef = useRef<Core[]>([]);
   const nextCoreIdRef = useRef<number>(1);
-  // Did the player place at least one core? Game-over only fires after a
-  // placement has actually happened, so the pre-placement free-play loop is
-  // not interrupted.
+  // Each player gets exactly one core for the run. hasPlacedCoreRef both
+  // gates further placement attempts and arms the game-over condition (only
+  // fires once a core has actually been placed, so the pre-placement free-
+  // play loop is not interrupted). Mirror state drives the placement hint.
   const hasPlacedCoreRef = useRef<boolean>(false);
+  const [hasPlacedCore, setHasPlacedCore] = useState(false);
   // Placement mode: toggled with 'c'. Mirror state drives the cursor hint.
   const placingCoreRef = useRef<boolean>(false);
   const [isPlacingCore, setIsPlacingCore] = useState(false);
@@ -273,13 +275,20 @@ export default function TankShooter() {
       // mouseDownRef — otherwise releasing 'c' mid-hold would auto-fire.
       if (placingCoreRef.current) {
         const preview = previewCoreRef.current;
-        if (preview && preview.valid && aliveRef.current && !coreDestroyedRef.current) {
+        if (
+          preview &&
+          preview.valid &&
+          aliveRef.current &&
+          !coreDestroyedRef.current &&
+          !hasPlacedCoreRef.current
+        ) {
           coresRef.current = [
             ...coresRef.current,
             createCore(nextCoreIdRef.current++, preview.center),
           ];
           hasPlacedCoreRef.current = true;
-          // Auto-exit placement after a successful drop. Press 'c' again to place more.
+          setHasPlacedCore(true);
+          // One core per run — exit placement and lock the 'c' keybind below.
           placingCoreRef.current = false;
           setIsPlacingCore(false);
           previewCoreRef.current = null;
@@ -337,9 +346,12 @@ export default function TankShooter() {
       if (e.repeat) return;
       const k = e.key.toLowerCase();
       if (k === 'c') {
-        // Toggle core placement mode. Disallowed while dead or after game-over.
+        // Toggle core placement mode. Disallowed while dead, after game-over,
+        // or once the player's one core has already been placed. Canceling
+        // an already-open placement is still allowed.
         if (!aliveRef.current || coreDestroyedRef.current) return;
         const next = !placingCoreRef.current;
+        if (next && hasPlacedCoreRef.current) return;
         placingCoreRef.current = next;
         setIsPlacingCore(next);
         if (!next) previewCoreRef.current = null;
@@ -777,7 +789,9 @@ export default function TankShooter() {
       <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">
         {isPlacingCore
           ? "Left click to place core — press [C] to cancel"
-          : "Left click to shoot · WASD to move · [C] to place core"}
+          : hasPlacedCore
+            ? "Left click to shoot · WASD to move"
+            : "Left click to shoot · WASD to move · [C] to place core"}
       </div>
       <div id="hud-score-level" data-hud="score-level" className="hud-score-level">
         <div className="hud-pill hud-pill-score">
