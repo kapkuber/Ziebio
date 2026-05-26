@@ -1,0 +1,307 @@
+// Core: the player's base. Placed by the player, takes contact damage from
+// polygons, and when destroyed ends the run.
+import { GRID_SIZE } from './config';
+import type { GameEntity, Vec2 } from './entities';
+import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
+
+export const CORE_GRID_CELLS = 4;
+export const CORE_SIZE = CORE_GRID_CELLS * GRID_SIZE; // 125 px square
+
+export const CORE_MAX_HP = 1000;
+
+// Center-to-center spacing required between any two cores. Picked so two
+// cores can never share placement footprints with a comfortable buffer.
+export const CORE_MIN_SEPARATION = CORE_SIZE * 5;
+
+// Lvl 1 structural palette. The diamond accent is NOT defined here — it
+// comes from the owning team's palette (see ./teams.ts) so red-team cores
+// get red accents, green-team cores get green accents, etc.
+export const CORE_PLATE_FILL = '#a1a3a6';
+export const CORE_OUTLINE = '#575757';
+const CORE_OUTLINE_WIDTH = 3; // slightly thinner than polygons; structures read as static
+
+// Reciprocal body damage on overlap. Same continuous-contact model as the
+// player vs polygons — applied every overlap tick, scaled by dt.
+export const CORE_BODY_DAMAGE_TO_ENTITY = 60;
+export const CORE_BODY_DAMAGE_FROM_ENTITY = 8;
+
+export interface Core {
+  id: number;
+  pos: Vec2;       // center
+  size: number;    // square side length (px)
+  hp: number;
+  maxHp: number;
+  ownerId: number; // 0 = local player; reserved for per-player attribution
+  teamId: TeamId;  // drives accent color via getTeamPalette
+}
+
+export function createCore(
+  id: number,
+  center: Vec2,
+  teamId: TeamId = LOCAL_PLAYER_TEAM,
+  ownerId: number = 0,
+): Core {
+  return {
+    id,
+    pos: { x: center.x, y: center.y },
+    size: CORE_SIZE,
+    hp: CORE_MAX_HP,
+    maxHp: CORE_MAX_HP,
+    ownerId,
+    teamId,
+  };
+}
+
+// Snap a world coordinate so the core's bounding box aligns to the GRID_SIZE
+// grid. For an odd cell count (5) the resulting center sits at half-cell
+// offsets, which keeps the outer edges flush with grid lines.
+export function snapCoreCenter(x: number, y: number): Vec2 {
+  const half = CORE_SIZE / 2;
+  const tlx = Math.round((x - half) / GRID_SIZE) * GRID_SIZE;
+  const tly = Math.round((y - half) / GRID_SIZE) * GRID_SIZE;
+  return { x: tlx + half, y: tly + half };
+}
+
+export type PlacementReason = 'ok' | 'outside-map' | 'too-close-to-core' | 'entity-overlap';
+
+export interface PlacementValidation {
+  valid: boolean;
+  reason: PlacementReason;
+}
+
+export function validateCorePlacement(
+  center: Vec2,
+  cores: Core[],
+  entities: GameEntity[],
+  mapW: number,
+  mapH: number,
+): PlacementValidation {
+  const half = CORE_SIZE / 2;
+  if (
+    center.x - half < 0 ||
+    center.x + half > mapW ||
+    center.y - half < 0 ||
+    center.y + half > mapH
+  ) {
+    return { valid: false, reason: 'outside-map' };
+  }
+  for (const c of cores) {
+    const dx = c.pos.x - center.x;
+    const dy = c.pos.y - center.y;
+    if (dx * dx + dy * dy < CORE_MIN_SEPARATION * CORE_MIN_SEPARATION) {
+      return { valid: false, reason: 'too-close-to-core' };
+    }
+  }
+  const minX = center.x - half;
+  const maxX = center.x + half;
+  const minY = center.y - half;
+  const maxY = center.y + half;
+  for (const e of entities) {
+    const r = e.size * 0.5;
+    const closestX = Math.max(minX, Math.min(e.pos.x, maxX));
+    const closestY = Math.max(minY, Math.min(e.pos.y, maxY));
+    const dx = e.pos.x - closestX;
+    const dy = e.pos.y - closestY;
+    if (dx * dx + dy * dy < r * r) {
+      return { valid: false, reason: 'entity-overlap' };
+    }
+  }
+  return { valid: true, reason: 'ok' };
+}
+
+// MTV (minimum translation vector) for a circle of radius r at (cx, cy)
+// overlapping an AABB. Returns null if no overlap. The normal points from
+// the closest AABB point toward the circle center; when the center sits
+// inside the AABB it ejects along the shortest face axis.
+function aabbCircleMTV(
+  rectMinX: number,
+  rectMinY: number,
+  rectMaxX: number,
+  rectMaxY: number,
+  cx: number,
+  cy: number,
+  r: number,
+): { nx: number; ny: number; pen: number } | null {
+  const closestX = Math.max(rectMinX, Math.min(cx, rectMaxX));
+  const closestY = Math.max(rectMinY, Math.min(cy, rectMaxY));
+  const dx = cx - closestX;
+  const dy = cy - closestY;
+  const d2 = dx * dx + dy * dy;
+  if (d2 >= r * r) return null;
+  if (d2 > 1e-6) {
+    const d = Math.sqrt(d2);
+    return { nx: dx / d, ny: dy / d, pen: r - d };
+  }
+  const exitL = cx - rectMinX;
+  const exitR = rectMaxX - cx;
+  const exitT = cy - rectMinY;
+  const exitB = rectMaxY - cy;
+  const exit = Math.min(exitL, exitR, exitT, exitB);
+  if (exit === exitL) return { nx: -1, ny: 0, pen: r + exit };
+  if (exit === exitR) return { nx: 1, ny: 0, pen: r + exit };
+  if (exit === exitT) return { nx: 0, ny: -1, pen: r + exit };
+  return { nx: 0, ny: 1, pen: r + exit };
+}
+
+// Push polygons out of any live core's AABB and apply reciprocal contact
+// damage. Splices killed entities out in-place. Returns the IDs of cores
+// that died this tick so the caller can filter and trigger game-over.
+export function resolveCoreEntityCollisions(
+  cores: Core[],
+  entities: GameEntity[],
+  dt: number,
+  onEntityKilled: (e: GameEntity) => void,
+): number[] {
+  if (!cores.length || !entities.length) return [];
+  const KICK = 80;
+  const deadCoreIds: number[] = [];
+  // Walk entities backwards so splicing during iteration is safe.
+  for (let ei = entities.length - 1; ei >= 0; ei--) {
+    const e = entities[ei];
+    const r = e.size * 0.5;
+    for (const c of cores) {
+      if (c.hp <= 0) continue;
+      const half = c.size * 0.5;
+      const mtv = aabbCircleMTV(
+        c.pos.x - half, c.pos.y - half, c.pos.x + half, c.pos.y + half,
+        e.pos.x, e.pos.y, r,
+      );
+      if (!mtv) continue;
+      e.pos.x += mtv.nx * mtv.pen;
+      e.pos.y += mtv.ny * mtv.pen;
+      e.kick.x += mtv.nx * KICK;
+      e.kick.y += mtv.ny * KICK;
+
+      e.hp = Math.max(0, e.hp - CORE_BODY_DAMAGE_TO_ENTITY * dt);
+      c.hp = Math.max(0, c.hp - CORE_BODY_DAMAGE_FROM_ENTITY * dt);
+      if (c.hp <= 0) deadCoreIds.push(c.id);
+      if (e.hp <= 0) {
+        onEntityKilled(e);
+        entities.splice(ei, 1);
+        break; // entity gone; stop checking it against other cores
+      }
+    }
+  }
+  return deadCoreIds;
+}
+
+// Player-vs-core collision: push the tank out of any core it overlaps,
+// no damage either way. Velocity's inward component is zeroed so the tank
+// settles flush against the wall instead of vibrating when WASD is held
+// into it.
+export function resolvePlayerCoreCollisions(
+  cores: Core[],
+  playerPos: Vec2,
+  playerVel: Vec2,
+  tankRadius: number,
+): void {
+  if (!cores.length) return;
+  for (const c of cores) {
+    if (c.hp <= 0) continue;
+    const half = c.size * 0.5;
+    const mtv = aabbCircleMTV(
+      c.pos.x - half, c.pos.y - half, c.pos.x + half, c.pos.y + half,
+      playerPos.x, playerPos.y, tankRadius,
+    );
+    if (!mtv) continue;
+    playerPos.x += mtv.nx * mtv.pen;
+    playerPos.y += mtv.ny * mtv.pen;
+    // Strip the velocity component pointing INTO the surface (vIn < 0).
+    const vIn = playerVel.x * mtv.nx + playerVel.y * mtv.ny;
+    if (vIn < 0) {
+      playerVel.x -= mtv.nx * vIn;
+      playerVel.y -= mtv.ny * vIn;
+    }
+  }
+}
+
+interface DrawCoreOptions {
+  alpha?: number;     // < 1 = preview / ghost
+  invalid?: boolean;  // tinted red when preview is in an invalid spot
+  showHp?: boolean;
+  hpRatio?: number;   // 0..1
+}
+
+export function drawCore(
+  ctx: CanvasRenderingContext2D,
+  core: Pick<Core, 'pos' | 'size' | 'teamId'>,
+  camera: { x: number; y: number; width: number; height: number },
+  options: DrawCoreOptions = {},
+): void {
+  const sx = core.pos.x - camera.x;
+  const sy = core.pos.y - camera.y;
+  const half = core.size / 2;
+  if (sx + half < 0 || sx - half > camera.width ||
+      sy + half < 0 || sy - half > camera.height) return;
+
+  const alpha = options.alpha ?? 1;
+  const invalid = !!options.invalid;
+  const palette = getTeamPalette(core.teamId);
+  const plateFill = invalid ? '#d8a8a8' : CORE_PLATE_FILL;
+  // Invalid-placement always reads as red regardless of team — it's a
+  // "blocked" signal, not a team color. Future polish: pick a contrasting
+  // warning hue if the local team itself is red.
+  const accentFill = invalid ? '#e07070' : palette.accent;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(sx, sy);
+  ctx.strokeStyle = CORE_OUTLINE;
+  ctx.lineWidth = CORE_OUTLINE_WIDTH;
+
+  // Outer square plate
+  ctx.fillStyle = plateFill;
+  ctx.beginPath();
+  ctx.rect(-half, -half, core.size, core.size);
+  ctx.fill();
+  ctx.stroke();
+
+  // Inner diamond — the identifying accent mark
+  const diamondR = core.size * 0.34;
+  ctx.fillStyle = accentFill;
+  ctx.beginPath();
+  ctx.moveTo(0, -diamondR);
+  ctx.lineTo(diamondR, 0);
+  ctx.lineTo(0, diamondR);
+  ctx.lineTo(-diamondR, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.restore();
+
+  // HP bar (only render when damaged)
+  if (options.showHp && options.hpRatio !== undefined && options.hpRatio < 1) {
+    const ratio = Math.max(0, Math.min(1, options.hpRatio));
+    const barW = core.size * 1.1;
+    const barH = 10;
+    const radius = barH / 2;
+    const bx = sx - barW / 2;
+    const by = sy + half + 14;
+    ctx.fillStyle = '#555555';
+    ctx.beginPath();
+    ctx.moveTo(bx + radius, by);
+    ctx.lineTo(bx + barW - radius, by);
+    ctx.arc(bx + barW - radius, by + radius, radius, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(bx + radius, by + barH);
+    ctx.arc(bx + radius, by + radius, radius, Math.PI / 2, -Math.PI / 2);
+    ctx.closePath();
+    ctx.fill();
+    const innerH = 6;
+    const innerR = innerH / 2;
+    const pad = (barH - innerH) / 2;
+    const innerX = bx + pad;
+    const fy = by + pad;
+    const innerW = barW - 2 * pad;
+    const fillLen = Math.max(innerR * 2, innerW * ratio);
+    ctx.fillStyle = '#85e37d';
+    ctx.beginPath();
+    ctx.moveTo(innerX + innerR, fy);
+    ctx.lineTo(innerX + fillLen - innerR, fy);
+    ctx.arc(innerX + fillLen - innerR, fy + innerR, innerR, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(innerX + innerR, fy + innerH);
+    ctx.arc(innerX + innerR, fy + innerR, innerR, Math.PI / 2, -Math.PI / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+}

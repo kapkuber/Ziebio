@@ -53,6 +53,17 @@ import {
   type StatKey,
   type StatPoints,
 } from "./game/stats";
+import {
+  CORE_SIZE,
+  createCore,
+  drawCore,
+  resolveCoreEntityCollisions,
+  resolvePlayerCoreCollisions,
+  snapCoreCenter,
+  validateCorePlacement,
+  type Core,
+} from "./game/core";
+import { LOCAL_PLAYER_TEAM } from "./game/teams";
 
 /**
  * Suggested repo setup (outside this file):
@@ -127,6 +138,30 @@ export default function TankShooter() {
   // respawn. Multiplied into the normal stat-derived zoom each frame.
   const deathZoomRef = useRef<number>(1);
 
+  // Cores owned by the local player. The frame loop reads coresRef; React
+  // state mirrors its length so the HUD/overlay can react to placements.
+  const coresRef = useRef<Core[]>([]);
+  const nextCoreIdRef = useRef<number>(1);
+  // Did the player place at least one core? Game-over only fires after a
+  // placement has actually happened, so the pre-placement free-play loop is
+  // not interrupted.
+  const hasPlacedCoreRef = useRef<boolean>(false);
+  // Placement mode: toggled with 'c'. Mirror state drives the cursor hint.
+  const placingCoreRef = useRef<boolean>(false);
+  const [isPlacingCore, setIsPlacingCore] = useState(false);
+  // Each frame in placement mode we compute the snapped preview position and
+  // whether the spot is legal; the click handler reads this to decide whether
+  // to actually place.
+  const previewCoreRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  // Game-over (core destroyed) state. Ref drives the loop, state drives JSX.
+  const coreDestroyedRef = useRef<boolean>(false);
+  const [coreDestroyed, setCoreDestroyed] = useState(false);
+  const [coreDestroyedInfo, setCoreDestroyedInfo] = useState<{
+    level: number;
+    score: number;
+    timeSeconds: number;
+  } | null>(null);
+
   const [playerStats, setPlayerStats] = useState<StatPoints>({ ...INITIAL_STATS });
   const [playerProgress, setPlayerProgress] = useState({ level: 1, xp: 0 });
   const [score, setScore] = useState(0);
@@ -134,7 +169,17 @@ export default function TankShooter() {
   // mirror state to drive the death overlay UI.
   const aliveRef = useRef(true);
   const [isDead, setIsDead] = useState(false);
-  const [deathInfo, setDeathInfo] = useState<{ level: number; score: number } | null>(null);
+  const [deathInfo, setDeathInfo] = useState<{
+    killerName: string;
+    level: number;
+    score: number;
+    timeSeconds: number;
+  } | null>(null);
+  // Most recent damage source — set whenever a collision deals damage, used
+  // to attribute the kill on the death screen.
+  const lastDamageSourceRef = useRef<string>("Unnamed Tank");
+  // Real time (ms) when the current life started, for the death-screen Time stat.
+  const lifeStartMsRef = useRef<number>(Date.now());
 
   // Seed a few entities on mount so something draws immediately.
   // Pass the actual tankPosRef so spawn placement respects SPAWN_SAFE_RADIUS
@@ -171,13 +216,23 @@ export default function TankShooter() {
     const h = rect.height / zoom;
     const m = { x: mouseRef.current.x / zoom, y: mouseRef.current.y / zoom };
     const bulletRadius = BULLET_RADIUS * derived.sizeMultiplier;
-    tankSpawnBullet(bulletsRef.current as any, bulletIdRef as any, tank, tankVelRef.current, m, w, h, {
-      speed: derived.bulletSpeed,
-      damage: derived.bulletDamage,
-      hp: derived.bulletHpMax,
-      lifetime: BULLET_LIFETIME,
-      radius: bulletRadius,
-    });
+    tankSpawnBullet(
+      bulletsRef.current as any,
+      bulletIdRef as any,
+      tank,
+      tankVelRef.current,
+      m,
+      w,
+      h,
+      LOCAL_PLAYER_TEAM,
+      {
+        speed: derived.bulletSpeed,
+        damage: derived.bulletDamage,
+        hp: derived.bulletHpMax,
+        lifetime: BULLET_LIFETIME,
+        radius: bulletRadius,
+      },
+    );
   }
 
   // Resize canvas to full window and account for devicePixelRatio
@@ -213,6 +268,24 @@ export default function TankShooter() {
     }
     function onDown(e: MouseEvent) {
       if (e.button !== 0) return; // left click only
+      // Placement mode hijacks left-click: try to drop the core at the
+      // previewed spot. Don't fall through to shooting or even arm
+      // mouseDownRef — otherwise releasing 'c' mid-hold would auto-fire.
+      if (placingCoreRef.current) {
+        const preview = previewCoreRef.current;
+        if (preview && preview.valid && aliveRef.current && !coreDestroyedRef.current) {
+          coresRef.current = [
+            ...coresRef.current,
+            createCore(nextCoreIdRef.current++, preview.center),
+          ];
+          hasPlacedCoreRef.current = true;
+          // Auto-exit placement after a successful drop. Press 'c' again to place more.
+          placingCoreRef.current = false;
+          setIsPlacingCore(false);
+          previewCoreRef.current = null;
+        }
+        return;
+      }
       mouseDownRef.current = true;
       // Respect global cooldown
       if (cooldownRemainingRef.current <= 0) {
@@ -262,7 +335,17 @@ export default function TankShooter() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.repeat) return;
-      if (e.key.toLowerCase() === 'm') {
+      const k = e.key.toLowerCase();
+      if (k === 'c') {
+        // Toggle core placement mode. Disallowed while dead or after game-over.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        const next = !placingCoreRef.current;
+        placingCoreRef.current = next;
+        setIsPlacingCore(next);
+        if (!next) previewCoreRef.current = null;
+        return;
+      }
+      if (k === 'm') {
         const current = playerProgressRef.current;
         if (current.level < MAX_LEVEL) {
           const nextLevel = current.level + 1;
@@ -390,6 +473,9 @@ export default function TankShooter() {
       const onPlayerCollide = (entity: GameEntity, overlapDt: number) => {
         // Dead tank can't damage or take damage from polygons.
         if (!aliveRef.current) return;
+        // Attribute any future kill to this entity (capitalize the kind).
+        lastDamageSourceRef.current =
+          entity.kind.charAt(0).toUpperCase() + entity.kind.slice(1);
         // Per-tick body-damage exchange (matches diep/arras — no cooldown,
         // damage applies every frame of overlap). deathFactor scales the
         // dying side's reciprocal damage so insta-killing a low-HP polygon
@@ -465,10 +551,90 @@ export default function TankShooter() {
         replenish(bodyRemovedTriangles, 'triangle');
         replenish(bodyRemovedPentagons, 'pentagon');
       }
+      // Polygon-core contact: push entities out of any live core and apply
+      // reciprocal body damage. Runs before entity-entity resolution so an
+      // entity pushed out of a core can then settle against neighbours.
+      // Note: core kills grant score only, not XP — the player gets credit
+      // for defenses they built, but XP comes from kills the player makes.
+      if (coresRef.current.length > 0) {
+        const deadCoreIds = resolveCoreEntityCollisions(
+          coresRef.current,
+          entitiesRef.current as any,
+          dt,
+          (e) => {
+            entsQueueDeathFx(e);
+            pendingScoreRef.current += scoreForKill(e.kind, e.maxHp);
+          },
+        );
+        if (deadCoreIds.length > 0) {
+          const dead = new Set(deadCoreIds);
+          coresRef.current = coresRef.current.filter((c) => !dead.has(c.id));
+          // Game-over fires only once all of the player's placed cores are
+          // gone — supports the future "multiple cores per player" case.
+          if (
+            !coreDestroyedRef.current &&
+            hasPlacedCoreRef.current &&
+            coresRef.current.length === 0
+          ) {
+            coreDestroyedRef.current = true;
+            aliveRef.current = false;
+            const finalLevel = playerProgressRef.current.level;
+            const finalScore = score + pendingScoreRef.current;
+            const timeSeconds = Math.max(
+              0,
+              Math.floor((Date.now() - lifeStartMsRef.current) / 1000),
+            );
+            setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
+            setCoreDestroyed(true);
+            // Exit placement mode if it was open.
+            placingCoreRef.current = false;
+            setIsPlacingCore(false);
+            previewCoreRef.current = null;
+          }
+        }
+      }
+      // Player-core contact: push the tank out of any core it overlaps. No
+      // damage — friendly cores are solid walls, not threats.
+      if (coresRef.current.length > 0 && aliveRef.current) {
+        resolvePlayerCoreCollisions(
+          coresRef.current,
+          tankPosRef.current,
+          tankVelRef.current,
+          tankRadius,
+        );
+      }
       resolveEntityEntityCollisions(entitiesRef.current as any);
       entsDeathUpdate(dt);
       entsDraw(ctx, camera.width, camera.height, camera.x, camera.y, entitiesRef.current as any);
       entsDeathDraw(ctx, camera.width, camera.height, camera.x, camera.y);
+
+      // Draw all placed cores (under bullets/tank so projectiles read on top).
+      for (const c of coresRef.current) {
+        drawCore(ctx, c, camera, { showHp: true, hpRatio: c.hp / c.maxHp });
+      }
+      // Placement preview: snap the cursor to the grid, validate, and draw a
+      // semi-transparent core. Click handler reads previewCoreRef to commit.
+      if (placingCoreRef.current && aliveRef.current && !coreDestroyedRef.current) {
+        const mwx = camera.x + mouseRef.current.x / zoom;
+        const mwy = camera.y + mouseRef.current.y / zoom;
+        const snapped = snapCoreCenter(mwx, mwy);
+        const validation = validateCorePlacement(
+          snapped,
+          coresRef.current,
+          entitiesRef.current as any,
+          MAP_WIDTH,
+          MAP_HEIGHT,
+        );
+        previewCoreRef.current = { center: snapped, valid: validation.valid };
+        drawCore(
+          ctx,
+          { pos: snapped, size: CORE_SIZE, teamId: LOCAL_PLAYER_TEAM },
+          camera,
+          { alpha: 0.45, invalid: !validation.valid },
+        );
+      } else if (previewCoreRef.current) {
+        previewCoreRef.current = null;
+      }
 
       const bulletResult = updateBullets({
         bullets: bulletsRef.current,
@@ -494,7 +660,7 @@ export default function TankShooter() {
       renderBullets(ctx, bulletsRef.current, camera);
       const mouseWorld = { x: mouseRef.current.x / zoom, y: mouseRef.current.y / zoom };
       if (alive) {
-        tankDraw(ctx, camera.width, camera.height, mouseWorld, sizeMultiplier);
+        tankDraw(ctx, camera.width, camera.height, mouseWorld, LOCAL_PLAYER_TEAM, sizeMultiplier);
         if (tookDamage) {
           timeSinceDamageRef.current = 0;
         } else {
@@ -515,7 +681,16 @@ export default function TankShooter() {
           // Capture final state for the respawn overlay.
           const finalLevel = playerProgressRef.current.level;
           const finalScore = score + pendingScoreRef.current;
-          setDeathInfo({ level: finalLevel, score: finalScore });
+          const timeSeconds = Math.max(
+            0,
+            Math.floor((Date.now() - lifeStartMsRef.current) / 1000),
+          );
+          setDeathInfo({
+            killerName: lastDamageSourceRef.current,
+            level: finalLevel,
+            score: finalScore,
+            timeSeconds,
+          });
           setIsDead(true);
         }
 
@@ -587,6 +762,9 @@ export default function TankShooter() {
     bulletsRef.current = [];
     // Reset score for the new life.
     setScore(0);
+    // Reset run-tracking refs for the new life.
+    lastDamageSourceRef.current = "Unnamed Tank";
+    lifeStartMsRef.current = Date.now();
     // Hide overlay and resume play.
     setIsDead(false);
     setDeathInfo(null);
@@ -596,7 +774,11 @@ export default function TankShooter() {
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
       <canvas ref={canvasRef} style={{ display: "block" }} />
-      <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">Left click to shoot - Move mouse to aim</div>
+      <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">
+        {isPlacingCore
+          ? "Left click to place core — press [C] to cancel"
+          : "Left click to shoot · WASD to move · [C] to place core"}
+      </div>
       <div id="hud-score-level" data-hud="score-level" className="hud-score-level">
         <div className="hud-pill hud-pill-score">
           <div className="hud-pill-fill score" />
@@ -658,30 +840,65 @@ export default function TankShooter() {
           })}
         </div>
       </div>
-      {isDead && deathInfo && (
+      {isDead && deathInfo && !coreDestroyed && (
         <div className="death-overlay">
           <div className="death-panel">
-            <h1 className="death-title">You Died</h1>
+            <div className="death-killed-by">You were killed by</div>
+            <div className="death-killer-name">{deathInfo.killerName}</div>
             <div className="death-stats">
               <div className="death-stat-row">
-                <span className="death-stat-label">Score</span>
+                <span className="death-stat-label">Score:</span>
                 <span className="death-stat-value">{deathInfo.score}</span>
               </div>
               <div className="death-stat-row">
-                <span className="death-stat-label">Level Reached</span>
+                <span className="death-stat-label">Level:</span>
                 <span className="death-stat-value">{deathInfo.level}</span>
               </div>
               <div className="death-stat-row">
-                <span className="death-stat-label">Respawn Level</span>
+                <span className="death-stat-label">Time:</span>
                 <span className="death-stat-value">
-                  {Math.max(1, Math.floor(deathInfo.level / 2))}
+                  {deathInfo.timeSeconds >= 60
+                    ? `${Math.floor(deathInfo.timeSeconds / 60)}m ${deathInfo.timeSeconds % 60}s`
+                    : `${deathInfo.timeSeconds}s`}
                 </span>
               </div>
             </div>
-            <button className="death-respawn-btn" onClick={handleRespawn}>
-              Respawn
-            </button>
           </div>
+          <button className="death-respawn-btn" onClick={handleRespawn}>
+            Respawn
+          </button>
+        </div>
+      )}
+      {coreDestroyed && coreDestroyedInfo && (
+        <div className="death-overlay">
+          <div className="death-panel">
+            <div className="death-killed-by">Game Over</div>
+            <div className="death-killer-name">Core Destroyed</div>
+            <div className="death-stats">
+              <div className="death-stat-row">
+                <span className="death-stat-label">Score:</span>
+                <span className="death-stat-value">{coreDestroyedInfo.score}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Level:</span>
+                <span className="death-stat-value">{coreDestroyedInfo.level}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Time:</span>
+                <span className="death-stat-value">
+                  {coreDestroyedInfo.timeSeconds >= 60
+                    ? `${Math.floor(coreDestroyedInfo.timeSeconds / 60)}m ${coreDestroyedInfo.timeSeconds % 60}s`
+                    : `${coreDestroyedInfo.timeSeconds}s`}
+                </span>
+              </div>
+            </div>
+          </div>
+          <button
+            className="death-respawn-btn"
+            onClick={() => window.location.reload()}
+          >
+            Restart
+          </button>
         </div>
       )}
     </div>

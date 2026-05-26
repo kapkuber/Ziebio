@@ -16,9 +16,8 @@ import {
 import { BULLET_RADIUS } from "./tank";
 import type { CameraInfo } from "./config";
 import { SHAPE_BASE_DAMAGE, computeBulletHitDamage } from "./stats";
+import { getTeamPalette } from "./teams";
 
-const BULLET_FILL = "#00b2e1";
-const BULLET_STROKE = "#0085a8";
 const BULLET_OUTLINE_WIDTH = 2.7;
 
 export interface BulletUpdateParams {
@@ -188,7 +187,7 @@ export function updateBullets({
       for (let j = i + 1; j < bullets.length; j++) {
         const b = bullets[j];
         if (b.life <= 0) continue;
-        if (a.owner === b.owner) continue;
+        if (a.teamId === b.teamId) continue;
         const dx = a.pos.x - b.pos.x;
         const dy = a.pos.y - b.pos.y;
         const r = a.radius + b.radius;
@@ -236,10 +235,13 @@ export function renderBullets(
   camera: CameraInfo,
 ): void {
   const { x: camX, y: camY } = camera;
-  ctx.fillStyle = BULLET_FILL;
-  ctx.strokeStyle = BULLET_STROKE;
   ctx.lineWidth = BULLET_OUTLINE_WIDTH;
+  // Fill/stroke set per-bullet from the firing team's palette. Cheap at
+  // current bullet counts; group-by-team if it ever shows up in a profile.
   for (const bullet of bullets) {
+    const palette = getTeamPalette(bullet.teamId);
+    ctx.fillStyle = palette.bullet;
+    ctx.strokeStyle = palette.accentDim;
     ctx.beginPath();
     ctx.arc(bullet.pos.x - camX, bullet.pos.y - camY, bullet.radius, 0, Math.PI * 2);
     ctx.fill();

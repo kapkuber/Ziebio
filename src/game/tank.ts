@@ -1,8 +1,7 @@
 // Player tank logic and constants
 export interface Vec2 { x: number; y: number }
 import { HIT_FILL, HIT_STROKE, HIT_FLASH_DURATION } from './entities';
-
-export type BulletOwner = 'player' | 'enemy';
+import { getTeamPalette, type TeamId } from './teams';
 
 export interface Bullet {
   id: number;
@@ -13,7 +12,7 @@ export interface Bullet {
   hp: number;
   maxHp: number;
   damage: number;
-  owner: BulletOwner;
+  teamId: TeamId; // drives bullet color and same-team pass-through
   hitIds: Set<number>;
 }
 
@@ -50,6 +49,7 @@ export function spawnBullet(
   mouse: Vec2,
   viewW: number,
   viewH: number,
+  teamId: TeamId,
   stats: BulletSpawnStats = {
     speed: BULLET_SPEED,
     damage: 7,
@@ -76,7 +76,7 @@ export function spawnBullet(
     hp: stats.hp,
     maxHp: stats.hp,
     damage: stats.damage,
-    owner: 'player',
+    teamId,
     hitIds: new Set(),
   });
   tankVel.x -= dir.x * RECOIL_IMPULSE;
@@ -88,8 +88,10 @@ export function drawTank(
   viewW: number,
   viewH: number,
   mouse: Vec2,
+  teamId: TeamId,
   sizeMultiplier: number = 1,
 ) {
+  const palette = getTeamPalette(teamId);
   const angle = Math.atan2(mouse.y - viewH / 2, mouse.x - viewW / 2);
   const radius = TANK_RADIUS * sizeMultiplier;
   const barrelLength = BARREL_LENGTH * sizeMultiplier;
@@ -97,8 +99,9 @@ export function drawTank(
   ctx.save();
   ctx.translate(viewW / 2, viewH / 2);
   ctx.rotate(angle);
-  ctx.fillStyle = "#999999"; // barrel color
-  ctx.strokeStyle = "#727272"; // barrel outline
+  // Barrel stays team-neutral (gray) — it's structural metal, not livery.
+  ctx.fillStyle = "#999999";
+  ctx.strokeStyle = "#727272";
   ctx.lineWidth = 3.5;
   const x = radius - 6 * sizeMultiplier;
   ctx.beginPath();
@@ -107,8 +110,9 @@ export function drawTank(
   ctx.stroke();
   ctx.restore();
 
-  ctx.fillStyle = "#00b2e1";
-  ctx.strokeStyle = "#0085a8";
+  // Body fill + outline from the team palette.
+  ctx.fillStyle = palette.accent;
+  ctx.strokeStyle = palette.accentDim;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
   ctx.arc(viewW / 2, viewH / 2, radius, 0, Math.PI * 2);
