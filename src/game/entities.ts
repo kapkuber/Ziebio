@@ -59,7 +59,7 @@ export const HIT_FILL = '#ff2021';
 export const HIT_STROKE = '#f01717';
 // Player contact damage
 // Death animation
-export const DEATH_ANIM_DURATION = 0.06; // seconds
+export const DEATH_ANIM_DURATION = 0.08; // seconds
 
 // Spawning / reproduction
 export const REPRO_RATE = 0.05; // chance/sec each entity reproduces

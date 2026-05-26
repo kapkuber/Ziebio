@@ -2,6 +2,7 @@
 // polygons, and when destroyed ends the run.
 import { GRID_SIZE } from './config';
 import type { GameEntity, Vec2 } from './entities';
+import { drawInnerHpBar } from './hpBar';
 import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
 
 export const CORE_GRID_CELLS = 4;
@@ -113,7 +114,7 @@ export function validateCorePlacement(
 // overlapping an AABB. Returns null if no overlap. The normal points from
 // the closest AABB point toward the circle center; when the center sits
 // inside the AABB it ejects along the shortest face axis.
-function aabbCircleMTV(
+export function aabbCircleMTV(
   rectMinX: number,
   rectMinY: number,
   rectMaxX: number,
@@ -337,40 +338,12 @@ export function drawCore(
   drawArrow(0, arrowDist, 0, 1);    // bottom
   drawArrow(-arrowDist, 0, -1, 0);  // left
 
-  ctx.restore();
-
-  // HP bar (only render when damaged)
-  if (options.showHp && options.hpRatio !== undefined && options.hpRatio < 1) {
-    const ratio = Math.max(0, Math.min(1, options.hpRatio));
-    const barW = core.size * 1.1;
-    const barH = 10;
-    const radius = barH / 2;
-    const bx = sx - barW / 2;
-    const by = sy + half + 14;
-    ctx.fillStyle = '#555555';
-    ctx.beginPath();
-    ctx.moveTo(bx + radius, by);
-    ctx.lineTo(bx + barW - radius, by);
-    ctx.arc(bx + barW - radius, by + radius, radius, -Math.PI / 2, Math.PI / 2);
-    ctx.lineTo(bx + radius, by + barH);
-    ctx.arc(bx + radius, by + radius, radius, Math.PI / 2, -Math.PI / 2);
-    ctx.closePath();
-    ctx.fill();
-    const innerH = 6;
-    const innerR = innerH / 2;
-    const pad = (barH - innerH) / 2;
-    const innerX = bx + pad;
-    const fy = by + pad;
-    const innerW = barW - 2 * pad;
-    const fillLen = Math.max(innerR * 2, innerW * ratio);
-    ctx.fillStyle = '#85e37d';
-    ctx.beginPath();
-    ctx.moveTo(innerX + innerR, fy);
-    ctx.lineTo(innerX + fillLen - innerR, fy);
-    ctx.arc(innerX + fillLen - innerR, fy + innerR, innerR, -Math.PI / 2, Math.PI / 2);
-    ctx.lineTo(innerX + innerR, fy + innerH);
-    ctx.arc(innerX + innerR, fy + innerR, innerR, Math.PI / 2, -Math.PI / 2);
-    ctx.closePath();
-    ctx.fill();
+  // Shared inner HP bar — same renderer all structures (walls, future
+  // turrets/generators) use, so the damage indicator looks identical
+  // everywhere.
+  if (options.showHp && options.hpRatio !== undefined) {
+    drawInnerHpBar(ctx, core.size, options.hpRatio);
   }
+
+  ctx.restore();
 }

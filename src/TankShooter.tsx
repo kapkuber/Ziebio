@@ -63,6 +63,17 @@ import {
   validateCorePlacement,
   type Core,
 } from "./game/core";
+import {
+  WALL_SIZE,
+  createWall,
+  drawBuilding,
+  drawBuildableZone,
+  resolveBuildingEntityCollisions,
+  resolvePlayerBuildingCollisions,
+  snapBuildingCenter,
+  validateWallPlacement,
+  type Building,
+} from "./game/buildings";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
 
 /**
@@ -155,6 +166,19 @@ export default function TankShooter() {
   // whether the spot is legal; the click handler reads this to decide whether
   // to actually place.
   const previewCoreRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  // Buildings (walls today; turrets/generators later). Wall placement mode
+  // stays open after each successful drop so the player can place many in
+  // a row — toggled with 'v' (separate from core placement on 'c').
+  const buildingsRef = useRef<Building[]>([]);
+  const nextBuildingIdRef = useRef<number>(1);
+  const placingWallRef = useRef<boolean>(false);
+  const [isPlacingWall, setIsPlacingWall] = useState(false);
+  const previewWallRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  // Dev-only: 'k' tags this each press; the frame loop consumes the flag
+  // and damages whatever building/core sits under the cursor (10% of its
+  // max HP). Lets us exercise the damage / game-over flows without having
+  // to lure polygons onto every test target.
+  const pendingDevDamageRef = useRef<boolean>(false);
   // Game-over (core destroyed) state. Ref drives the loop, state drives JSX.
   const coreDestroyedRef = useRef<boolean>(false);
   const [coreDestroyed, setCoreDestroyed] = useState(false);
@@ -295,6 +319,23 @@ export default function TankShooter() {
         }
         return;
       }
+      if (placingWallRef.current) {
+        const preview = previewWallRef.current;
+        if (
+          preview &&
+          preview.valid &&
+          aliveRef.current &&
+          !coreDestroyedRef.current
+        ) {
+          buildingsRef.current = [
+            ...buildingsRef.current,
+            createWall(nextBuildingIdRef.current++, preview.center),
+          ];
+          // Stay in placement mode — let the player drop many walls in a
+          // row. Press 'v' again to exit. Preview will refresh next frame.
+        }
+        return;
+      }
       mouseDownRef.current = true;
       // Respect global cooldown
       if (cooldownRemainingRef.current <= 0) {
@@ -355,6 +396,36 @@ export default function TankShooter() {
         placingCoreRef.current = next;
         setIsPlacingCore(next);
         if (!next) previewCoreRef.current = null;
+        // Entering a placement mode cancels the other.
+        if (next && placingWallRef.current) {
+          placingWallRef.current = false;
+          setIsPlacingWall(false);
+          previewWallRef.current = null;
+        }
+        return;
+      }
+      if (k === 'v') {
+        // Toggle wall placement mode. Requires a placed core (no buildable
+        // zone exists otherwise). Stays open after each drop so the player
+        // can place many walls quickly; press 'v' again to exit.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        const next = !placingWallRef.current;
+        if (next && !hasPlacedCoreRef.current) return;
+        placingWallRef.current = next;
+        setIsPlacingWall(next);
+        if (!next) previewWallRef.current = null;
+        // Entering a placement mode cancels the other.
+        if (next && placingCoreRef.current) {
+          placingCoreRef.current = false;
+          setIsPlacingCore(false);
+          previewCoreRef.current = null;
+        }
+        return;
+      }
+      if (k === 'k') {
+        // Dev: damage the structure under the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingDevDamageRef.current = true;
         return;
       }
       if (k === 'm') {
@@ -605,6 +676,83 @@ export default function TankShooter() {
           }
         }
       }
+      // Polygon-building contact: same continuous-contact model as cores.
+      // Buildings that die this tick are filtered out below; score-only
+      // (no XP) to match the "kills you didn't actually make" rule.
+      if (buildingsRef.current.length > 0) {
+        const deadBuildingIds = resolveBuildingEntityCollisions(
+          buildingsRef.current,
+          entitiesRef.current as any,
+          dt,
+          (e) => {
+            entsQueueDeathFx(e);
+            pendingScoreRef.current += scoreForKill(e.kind, e.maxHp);
+          },
+        );
+        if (deadBuildingIds.length > 0) {
+          const dead = new Set(deadBuildingIds);
+          buildingsRef.current = buildingsRef.current.filter((b) => !dead.has(b.id));
+        }
+      }
+      // Dev: 'k' damages whatever structure sits under the cursor by 10% of
+      // its max HP. Buildings first (they sit visually on top of cores);
+      // falls through to the core if no building was hit. Mirrors the
+      // game-over trigger so a dev-killed last core still ends the run.
+      if (pendingDevDamageRef.current && aliveRef.current && !coreDestroyedRef.current) {
+        pendingDevDamageRef.current = false;
+        const mwx = camera.x + mouseRef.current.x / zoom;
+        const mwy = camera.y + mouseRef.current.y / zoom;
+        const containsPoint = (pos: Vec2, size: number) => {
+          const h = size / 2;
+          return mwx >= pos.x - h && mwx <= pos.x + h && mwy >= pos.y - h && mwy <= pos.y + h;
+        };
+        let hit: 'building' | 'core' | null = null;
+        for (const b of buildingsRef.current) {
+          if (containsPoint(b.pos, b.size)) {
+            b.hp = Math.max(0, b.hp - b.maxHp * 0.1);
+            hit = 'building';
+            break;
+          }
+        }
+        if (!hit) {
+          for (const c of coresRef.current) {
+            if (containsPoint(c.pos, c.size)) {
+              c.hp = Math.max(0, c.hp - c.maxHp * 0.1);
+              hit = 'core';
+              break;
+            }
+          }
+        }
+        if (hit === 'building') {
+          buildingsRef.current = buildingsRef.current.filter((b) => b.hp > 0);
+        } else if (hit === 'core') {
+          const before = coresRef.current.length;
+          coresRef.current = coresRef.current.filter((c) => c.hp > 0);
+          if (
+            coresRef.current.length < before &&
+            !coreDestroyedRef.current &&
+            hasPlacedCoreRef.current &&
+            coresRef.current.length === 0
+          ) {
+            coreDestroyedRef.current = true;
+            aliveRef.current = false;
+            const finalLevel = playerProgressRef.current.level;
+            const finalScore = score + pendingScoreRef.current;
+            const timeSeconds = Math.max(
+              0,
+              Math.floor((Date.now() - lifeStartMsRef.current) / 1000),
+            );
+            setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
+            setCoreDestroyed(true);
+            placingCoreRef.current = false;
+            setIsPlacingCore(false);
+            previewCoreRef.current = null;
+            placingWallRef.current = false;
+            setIsPlacingWall(false);
+            previewWallRef.current = null;
+          }
+        }
+      }
       // Player-core contact: push the tank out of any core it overlaps. No
       // damage — friendly cores are solid walls, not threats.
       if (coresRef.current.length > 0 && aliveRef.current) {
@@ -615,17 +763,37 @@ export default function TankShooter() {
           tankRadius,
         );
       }
+      // Player-building contact: walls block movement but deal no damage.
+      if (buildingsRef.current.length > 0 && aliveRef.current) {
+        resolvePlayerBuildingCollisions(
+          buildingsRef.current,
+          tankPosRef.current,
+          tankVelRef.current,
+          tankRadius,
+        );
+      }
       resolveEntityEntityCollisions(entitiesRef.current as any);
       entsDeathUpdate(dt);
       entsDraw(ctx, camera.width, camera.height, camera.x, camera.y, entitiesRef.current as any);
       entsDeathDraw(ctx, camera.width, camera.height, camera.x, camera.y);
 
+      // Buildable-zone outline: shown only while a placement mode is open,
+      // so the player can see where walls/future buildings are allowed.
+      if ((placingWallRef.current || (placingCoreRef.current && hasPlacedCoreRef.current))
+          && aliveRef.current && !coreDestroyedRef.current) {
+        for (const c of coresRef.current) {
+          drawBuildableZone(ctx, c, camera);
+        }
+      }
       // Draw all placed cores (under bullets/tank so projectiles read on top).
       for (const c of coresRef.current) {
         drawCore(ctx, c, camera, { showHp: true, hpRatio: c.hp / c.maxHp });
       }
-      // Placement preview: snap the cursor to the grid, validate, and draw a
-      // semi-transparent core. Click handler reads previewCoreRef to commit.
+      // Draw all buildings.
+      for (const b of buildingsRef.current) {
+        drawBuilding(ctx, b, camera, { showHp: true, hpRatio: b.hp / b.maxHp });
+      }
+      // Core placement preview.
       if (placingCoreRef.current && aliveRef.current && !coreDestroyedRef.current) {
         const mwx = camera.x + mouseRef.current.x / zoom;
         const mwy = camera.y + mouseRef.current.y / zoom;
@@ -646,6 +814,28 @@ export default function TankShooter() {
         );
       } else if (previewCoreRef.current) {
         previewCoreRef.current = null;
+      }
+      // Wall placement preview.
+      if (placingWallRef.current && aliveRef.current && !coreDestroyedRef.current) {
+        const mwx = camera.x + mouseRef.current.x / zoom;
+        const mwy = camera.y + mouseRef.current.y / zoom;
+        const snapped = snapBuildingCenter(mwx, mwy, 1);
+        const validation = validateWallPlacement(
+          snapped,
+          coresRef.current,
+          buildingsRef.current,
+          entitiesRef.current as any,
+          LOCAL_PLAYER_TEAM,
+        );
+        previewWallRef.current = { center: snapped, valid: validation.valid };
+        drawBuilding(
+          ctx,
+          { pos: snapped, size: WALL_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'wall' },
+          camera,
+          { alpha: 0.5, invalid: !validation.valid },
+        );
+      } else if (previewWallRef.current) {
+        previewWallRef.current = null;
       }
 
       const bulletResult = updateBullets({
@@ -789,9 +979,11 @@ export default function TankShooter() {
       <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">
         {isPlacingCore
           ? "Left click to place core — press [C] to cancel"
-          : hasPlacedCore
-            ? "Left click to shoot · WASD to move"
-            : "Left click to shoot · WASD to move · [C] to place core"}
+          : isPlacingWall
+            ? "Left click to place wall — press [V] to exit"
+            : hasPlacedCore
+              ? "Left click to shoot · WASD to move · [V] to place walls"
+              : "Left click to shoot · WASD to move · [C] to place core"}
       </div>
       <div id="hud-score-level" data-hud="score-level" className="hud-score-level">
         <div className="hud-pill hud-pill-score">
