@@ -13,7 +13,6 @@ export interface Bullet {
   maxHp: number;
   damage: number;
   teamId: TeamId; // drives bullet color and same-team pass-through
-  hitIds: Set<number>;
 }
 
 export const TANK_RADIUS = 24;
@@ -77,7 +76,6 @@ export function spawnBullet(
     maxHp: stats.hp,
     damage: stats.damage,
     teamId,
-    hitIds: new Set(),
   });
   tankVel.x -= dir.x * RECOIL_IMPULSE;
   tankVel.y -= dir.y * RECOIL_IMPULSE;

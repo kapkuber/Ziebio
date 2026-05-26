@@ -15,10 +15,17 @@ import {
 } from "./entities";
 import { BULLET_RADIUS } from "./tank";
 import type { CameraInfo } from "./config";
-import { SHAPE_BASE_DAMAGE, computeBulletHitDamage } from "./stats";
+import { SHAPE_BASE_DAMAGE, TICK_DURATION } from "./stats";
 import { getTeamPalette } from "./teams";
 
 const BULLET_OUTLINE_WIDTH = 2.7;
+// Per-tick velocity impulse applied to a bullet while it overlaps an entity,
+// directed away from the entity center. Friction-free, so it permanently bends
+// the bullet's trajectory. Magnitude tuned so a base bullet glancing through a
+// square barely deflects (~5°), while a slow high-pen bullet drilling a
+// pentagon for many ticks deflects noticeably (~25°). Bullet speed naturally
+// reduces the angular effect (same impulse, larger velocity = smaller angle).
+const BULLET_BOUNCE = 35;
 
 export interface BulletUpdateParams {
   bullets: Bullet[];
@@ -85,6 +92,15 @@ export function updateBullets({
     let removedTriangles = 0;
     let removedPentagons = 0;
 
+    // diep-style: per-tick body-damage exchange while bullet overlaps entity.
+    // Each tick (TICK_DURATION = 40ms) the entity loses bullet.damage and the
+    // bullet loses the entity's baseDamage. tickScale converts the per-tick
+    // calibration to whatever dt the frame actually ran at, so balance is
+    // framerate-independent. A base bullet (hp=7) vs a square (baseDamage=7)
+    // dies in exactly one tick of overlap, matching the prior one-shot model;
+    // a high-pen bullet keeps ticking until it loses contact or runs out of hp.
+    const tickScale = dt / TICK_DURATION;
+
     bulletLoop: for (const bullet of bullets) {
       if (bullet.life <= 0) continue;
       const cx = Math.floor(bullet.pos.x / cellSize);
@@ -95,16 +111,40 @@ export function updateBullets({
           if (!bucket) continue;
           for (const entity of bucket) {
             if (removed.has(entity.id)) continue;
-            if (bullet.hitIds.has(entity.id)) continue;
+            if (bullet.life <= 0) continue bulletLoop;
             const applyHit = (baseDamage: number, dxh: number, dyh: number, kickSign: 1 | -1) => {
-              const actualDamage = computeBulletHitDamage(bullet.damage, bullet.hp, baseDamage);
-              (entity as any).hp = Math.max(0, (entity as any).hp - actualDamage);
+              let entityDmg = bullet.damage * tickScale;
+              let bulletDmg = baseDamage * tickScale;
+              // Mutual overkill scaling, mirroring diep's receiveDamage: when
+              // either side would die before delivering its full damage, both
+              // sides' contributions scale down by the same ratio. This is what
+              // stops a high-pen bullet from paying full body damage to finish
+              // off a polygon that only had a sliver of hp left — without it,
+              // pure-pen builds out-trade balanced pen+speed builds because
+              // they have more hp to waste on overkill ticks.
+              const eHp = (entity as any).hp as number;
+              if (entityDmg > eHp) {
+                const scale = eHp / entityDmg;
+                entityDmg *= scale;
+                bulletDmg *= scale;
+              } else if (bulletDmg > bullet.hp) {
+                const scale = bullet.hp / bulletDmg;
+                entityDmg *= scale;
+                bulletDmg *= scale;
+              }
+              (entity as any).hp = Math.max(0, eHp - entityDmg);
               (entity as any).hitT = HIT_FLASH_DURATION;
               const len = Math.hypot(dxh, dyh) || 1;
-              (entity as any).kick.x += kickSign * (dxh / len) * ENTITY_BOUNCE;
-              (entity as any).kick.y += kickSign * (dyh / len) * ENTITY_BOUNCE;
-              bullet.hp -= baseDamage;
-              bullet.hitIds.add(entity.id);
+              const nx = dxh / len;
+              const ny = dyh / len;
+              // kickSign * (nx, ny) always points from the bullet toward the
+              // entity center, so the entity gets pushed away from the bullet
+              // and the bullet gets pushed away from the entity (opposite sign).
+              (entity as any).kick.x += kickSign * nx * ENTITY_BOUNCE * tickScale;
+              (entity as any).kick.y += kickSign * ny * ENTITY_BOUNCE * tickScale;
+              bullet.vel.x -= kickSign * nx * BULLET_BOUNCE * tickScale;
+              bullet.vel.y -= kickSign * ny * BULLET_BOUNCE * tickScale;
+              bullet.hp -= bulletDmg;
               if (bullet.hp <= 0) bullet.life = 0;
               if ((entity as any).hp <= 0) {
                 queueDeathEffect(entity);
@@ -120,14 +160,12 @@ export function updateBullets({
               const [v0, v1, v2] = triangleWorldVerts(entity.pos, entity.angle, insetSize);
               if (circleIntersectsTriangle({ x: bullet.pos.x, y: bullet.pos.y }, bullet.radius, v0, v1, v2)) {
                 applyHit(SHAPE_BASE_DAMAGE.triangle, entity.pos.x - bullet.pos.x, entity.pos.y - bullet.pos.y, 1);
-                continue bulletLoop;
               }
             } else if (entity.kind === "pentagon") {
               const insetSize = Math.max(1, entity.size - 2 * ENTITY_COLLISION_INSET);
               const [p0, p1, p2, p3, p4] = pentagonWorldVerts(entity.pos, entity.angle, insetSize);
               if (circleIntersectsPolygon({ x: bullet.pos.x, y: bullet.pos.y }, bullet.radius, [p0, p1, p2, p3, p4])) {
                 applyHit(SHAPE_BASE_DAMAGE.pentagon, entity.pos.x - bullet.pos.x, entity.pos.y - bullet.pos.y, 1);
-                continue bulletLoop;
               }
             } else {
               const dxp = bullet.pos.x - entity.pos.x;
@@ -135,7 +173,6 @@ export function updateBullets({
               const radius = bullet.radius + computeEntityCollisionRadius(entity.size);
               if (dxp * dxp + dyp * dyp <= radius * radius) {
                 applyHit(SHAPE_BASE_DAMAGE.square, dxp, dyp, -1);
-                continue bulletLoop;
               }
             }
           }
