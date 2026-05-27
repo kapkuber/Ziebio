@@ -68,16 +68,23 @@ import {
   FLUX_GEN_SIZE,
   FLUX_GEN_GRID_CELLS,
   FLUX_GEN_MAX_COUNT,
+  TURRET_SIZE,
+  TURRET_GRID_CELLS,
+  TURRET_FLUX_COST,
+  TURRET_MAX_COUNT,
   createWall,
   createFluxGenerator,
+  createTurret,
   drawBuilding,
   drawBuildableZone,
   fluxProducedThisFrame,
   resolveBuildingEntityCollisions,
   resolvePlayerBuildingCollisions,
   snapBuildingCenter,
+  updateTurrets,
   validateBuildingPlacement,
   type Building,
+  type TurretTarget,
 } from "./game/buildings";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
 import { Hud } from "./components/Hud";
@@ -164,6 +171,7 @@ export default function TankShooter() {
   const previewCoreRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
   const previewWallRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
   const previewFluxGenRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  const previewTurretRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
   // Buildings (walls + flux generators today; turrets/spawners later).
   const buildingsRef = useRef<Building[]>([]);
   const nextBuildingIdRef = useRef<number>(1);
@@ -311,6 +319,39 @@ export default function TankShooter() {
           return true;
         },
         onExit: () => { previewFluxGenRef.current = null; },
+      },
+      turret: {
+        key: 'b',
+        canEnter: () => hasPlacedCoreRef.current,
+        sticky: true,
+        tick: (ctx, camera, mouseWorld) => {
+          const snapped = snapBuildingCenter(mouseWorld.x, mouseWorld.y, TURRET_GRID_CELLS);
+          const v = validateBuildingPlacement(
+            snapped, TURRET_SIZE, coresRef.current, buildingsRef.current,
+            entitiesRef.current as any, LOCAL_PLAYER_TEAM,
+            { kind: 'turret', max: TURRET_MAX_COUNT },
+          );
+          const canAfford = fluxRef.current >= TURRET_FLUX_COST;
+          const valid = v.valid && canAfford;
+          previewTurretRef.current = { center: snapped, valid };
+          drawBuilding(
+            ctx,
+            { pos: snapped, size: TURRET_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'turret' },
+            camera,
+            { alpha: 0.5, invalid: !valid },
+          );
+        },
+        onClick: () => {
+          const p = previewTurretRef.current;
+          if (!p || !p.valid || fluxRef.current < TURRET_FLUX_COST) return false;
+          fluxRef.current -= TURRET_FLUX_COST;
+          buildingsRef.current = [
+            ...buildingsRef.current,
+            createTurret(nextBuildingIdRef.current++, p.center),
+          ];
+          return true;
+        },
+        onExit: () => { previewTurretRef.current = null; },
       },
     },
     () => aliveRef.current && !coreDestroyedRef.current,
@@ -742,6 +783,21 @@ export default function TankShooter() {
       if (aliveRef.current && !coreDestroyedRef.current && buildingsRef.current.length > 0) {
         fluxRef.current += fluxProducedThisFrame(buildingsRef.current, LOCAL_PLAYER_TEAM, dt);
       }
+      // Turret aim + fire. Target list is assembled per frame — only hostile
+      // tanks and (future) wave enemies belong here. Polygons are world
+      // resources, NOT turret targets, so they're intentionally absent.
+      // Today the list is empty (single-player MVP has no hostile players);
+      // when wave enemies / enemy tanks land, push their { pos, teamId } here.
+      if (buildingsRef.current.length > 0) {
+        const turretTargets: TurretTarget[] = [];
+        updateTurrets(
+          buildingsRef.current,
+          bulletsRef.current,
+          bulletIdRef,
+          dt,
+          turretTargets,
+        );
+      }
       // Dev: 'k' damages whatever structure sits under the cursor by 10% of
       // its max HP. Buildings first (they sit visually on top of cores);
       // falls through to the core if no building was hit. Mirrors the
@@ -910,8 +966,19 @@ export default function TankShooter() {
         const alpha = 1 - Math.exp(-HP_LERP_RATE * dt);
         tankDisplayHpRef.current +=
           (tankHpRef.current - tankDisplayHpRef.current) * alpha;
+        // Exponential easing never quite reaches the target — snap to max once
+        // we're close so the bar can hide cleanly the moment real HP fills.
+        if (tankHpRef.current >= derived.maxHp && tankDisplayHpRef.current > derived.maxHp - 0.5) {
+          tankDisplayHpRef.current = derived.maxHp;
+        }
 
-        tankDrawHp(ctx, camera.width, camera.height, tankDisplayHpRef.current, derived.maxHp, tankRadius);
+        // Hide the bar at full HP — matches the entity/building pattern. The
+        // gate uses real HP (not the lagged display value) so future regen
+        // mechanics work the same way: bar shows the moment damage is taken,
+        // hides the moment real HP refills.
+        if (tankHpRef.current < derived.maxHp) {
+          tankDrawHp(ctx, camera.width, camera.height, tankDisplayHpRef.current, derived.maxHp, tankRadius);
+        }
         // red tank flash overlay
         tankDrawHit(ctx, camera.width, camera.height, tankHitTRef.current, tankRadius);
       }
@@ -993,9 +1060,11 @@ export default function TankShooter() {
       ? `Left click to place wall (${WALL_FLUX_COST} flux) — press [V] to exit`
       : activeMode === 'fluxgen'
         ? "Left click to place flux generator — press [X] to exit"
-        : hasPlacedCore
-          ? "Left click to shoot · WASD to move · [V] walls · [X] flux generators"
-          : "Left click to shoot · WASD to move · [C] to place core";
+        : activeMode === 'turret'
+          ? `Left click to place turret (${TURRET_FLUX_COST} flux) — press [T] to exit`
+          : hasPlacedCore
+            ? "Left click to shoot · WASD to move · [V] walls · [X] flux generators · [T] turrets"
+            : "Left click to shoot · WASD to move · [C] to place core";
 
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>

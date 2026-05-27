@@ -20,10 +20,11 @@ import { getTeamPalette, type TeamId } from '../teams';
 
 import { WALL_DEF } from './wall';
 import { FLUX_GEN_DEF } from './fluxGenerator';
+import { TURRET_DEF } from './turret';
 
 // === Shared types ===
 
-export type BuildingKind = 'wall' | 'flux-generator';
+export type BuildingKind = 'wall' | 'flux-generator' | 'turret';
 
 export interface Building {
   id: number;
@@ -34,6 +35,11 @@ export interface Building {
   maxHp: number;
   ownerId: number;
   teamId: TeamId;
+  // Per-kind runtime state. Only the turret uses these today; left optional so
+  // walls / flux generators don't have to carry the fields. New kinds with
+  // their own state can extend here rather than introducing a parallel struct.
+  aimAngle?: number;        // turret: current barrel angle (radians)
+  reloadRemaining?: number; // turret: seconds until next shot can fire
 }
 
 // Per-kind contract used by cross-kind logic. Anything kind-specific that the
@@ -49,13 +55,16 @@ export interface BuildingDef {
   bodyDamageFromEntity: number; // taken from polygons per second of overlap
   // Renders the kind-specific interior. The shared chassis plate and HP bar
   // are drawn by the manager; the caller has translated the canvas origin
-  // to the building center and set a default stroke style/width.
+  // to the building center and set a default stroke style/width. `aimAngle`
+  // is threaded through for kinds with a rotating element (turret); kinds
+  // without state simply ignore it.
   drawInterior: (
     ctx: CanvasRenderingContext2D,
     size: number,
     accent: string,
     accentDim: string,
     invalid: boolean,
+    aimAngle?: number,
   ) => void;
 }
 
@@ -65,6 +74,7 @@ export interface BuildingDef {
 export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
   'wall': WALL_DEF,
   'flux-generator': FLUX_GEN_DEF,
+  'turret': TURRET_DEF,
 };
 
 export function getBuildingDef(kind: BuildingKind): BuildingDef {
@@ -278,7 +288,7 @@ export interface DrawBuildingOptions {
 
 export function drawBuilding(
   ctx: CanvasRenderingContext2D,
-  building: Pick<Building, 'pos' | 'size' | 'teamId' | 'kind'>,
+  building: Pick<Building, 'pos' | 'size' | 'teamId' | 'kind' | 'aimAngle'>,
   camera: { x: number; y: number; width: number; height: number },
   options: DrawBuildingOptions = {},
 ): void {
@@ -310,7 +320,9 @@ export function drawBuilding(
 
   // Per-kind interior. The def encapsulates everything kind-specific about
   // the visual; this dispatch is the single point of variance.
-  getBuildingDef(building.kind).drawInterior(ctx, building.size, accent, accentDim, invalid);
+  getBuildingDef(building.kind).drawInterior(
+    ctx, building.size, accent, accentDim, invalid, building.aimAngle,
+  );
 
   // Inner HP bar — shared with cores and all future buildings.
   if (options.showHp && options.hpRatio !== undefined) {

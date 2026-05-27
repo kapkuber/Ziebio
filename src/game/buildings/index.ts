@@ -5,3 +5,4 @@
 export * from './buildingSystem';
 export * from './wall';
 export * from './fluxGenerator';
+export * from './turret';
