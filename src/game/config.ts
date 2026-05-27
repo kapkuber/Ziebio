@@ -18,6 +18,14 @@ export const MAP_AREA_SCALE = (MAP_WIDTH * MAP_HEIGHT) / REFERENCE_MAP_AREA;
 export const SPAWN_SAFE_RADIUS = 10 * GRID_SIZE; // no-spawn radius around player
 export const MAX_SPAWNS_PER_FRAME = Math.max(2, Math.round(2 * MAP_AREA_SCALE));
 
+// Scale a reference entity count by current map area so per-kind population
+// caps grow with map size and density stays constant. Lives here next to
+// MAP_AREA_SCALE so per-shape modules can import it without pulling in the
+// whole entity system.
+export function scaleCount(base: number): number {
+  return Math.max(1, Math.round(base * MAP_AREA_SCALE));
+}
+
 export interface CameraInfo {
   x: number;
   y: number;

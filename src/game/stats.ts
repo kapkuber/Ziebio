@@ -93,7 +93,7 @@ export const HIGH_SPEED_DAMAGE_PENALTY = 0.08;
 // meaningful per-tick damage. IMPACT_SPEED_BONUS is the additional ceiling
 // added at full speed. Lower exponents flatten the curve (more linear).
 // With these defaults: standstill ~5×, half-speed ~12.5×, full-speed ~35×.
-export const IMPACT_BASE = 10;
+export const IMPACT_BASE = 13;
 export const IMPACT_SPEED_BONUS = 30;
 export const IMPACT_SPEED_EXPONENT = 2;
 

@@ -97,6 +97,11 @@
   transition: width 350ms ease-out;
 }
 
+#root .hud-score-level .hud-pill-fill.flux {
+  width: 100%;
+  background: #5cd4f2;
+}
+
 #root .hud-score-level .hud-text {
   flex: 1;
   position: relative;

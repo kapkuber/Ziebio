@@ -37,7 +37,6 @@ import { createGridPatterns, drawGrid, type GridPatterns } from "./game/grid";
 import { updateBullets, renderBullets } from "./game/bulletSystem";
 import {
   STAT_ORDER,
-  STAT_LABELS,
   MAX_STAT_POINTS,
   MAX_LEVEL,
   REGEN_HYPER_DELAY,
@@ -50,7 +49,6 @@ import {
   xpForKill,
   xpForNextLevel,
   SHAPE_BODY_DAMAGE_TO_TANK,
-  type StatKey,
   type StatPoints,
 } from "./game/stats";
 import {
@@ -65,16 +63,26 @@ import {
 } from "./game/core";
 import {
   WALL_SIZE,
+  WALL_GRID_CELLS,
+  WALL_FLUX_COST,
+  FLUX_GEN_SIZE,
+  FLUX_GEN_GRID_CELLS,
+  FLUX_GEN_MAX_COUNT,
   createWall,
+  createFluxGenerator,
   drawBuilding,
   drawBuildableZone,
+  fluxProducedThisFrame,
   resolveBuildingEntityCollisions,
   resolvePlayerBuildingCollisions,
   snapBuildingCenter,
-  validateWallPlacement,
+  validateBuildingPlacement,
   type Building,
 } from "./game/buildings";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
+import { Hud } from "./components/Hud";
+import { EndOverlay } from "./components/EndOverlay";
+import { usePlacementController } from "./hooks/usePlacementController";
 
 /**
  * Suggested repo setup (outside this file):
@@ -96,17 +104,6 @@ const INITIAL_STATS: StatPoints = {
   bulletDamage: 0,
   reload: 0,
   movementSpeed: 0,
-};
-
-const STAT_COLORS: Record<StatKey, string> = {
-  healthRegen: "#EF99C3",
-  maxHealth: "#8D6ADF",
-  bodyDamage: "#D83848",
-  bulletSpeed: "#3CA4CB",
-  bulletPenetration: "#B9E87E",
-  bulletDamage: "#FDF380",
-  reload: "#E7896D",
-  movementSpeed: "#70D1CA",
 };
 
 export default function TankShooter() {
@@ -159,21 +156,23 @@ export default function TankShooter() {
   // play loop is not interrupted). Mirror state drives the placement hint.
   const hasPlacedCoreRef = useRef<boolean>(false);
   const [hasPlacedCore, setHasPlacedCore] = useState(false);
-  // Placement mode: toggled with 'c'. Mirror state drives the cursor hint.
-  const placingCoreRef = useRef<boolean>(false);
-  const [isPlacingCore, setIsPlacingCore] = useState(false);
-  // Each frame in placement mode we compute the snapped preview position and
-  // whether the spot is legal; the click handler reads this to decide whether
-  // to actually place.
+  // Per-mode preview refs — each frame the active mode's tick (registered
+  // with usePlacementController below) computes the snapped position and
+  // whether the spot is legal; the onClick callback reads its ref to decide
+  // whether to actually place. The mode toggle / active state itself is
+  // owned by the controller, not by these refs.
   const previewCoreRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
-  // Buildings (walls today; turrets/generators later). Wall placement mode
-  // stays open after each successful drop so the player can place many in
-  // a row — toggled with 'v' (separate from core placement on 'c').
+  const previewWallRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  const previewFluxGenRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  // Buildings (walls + flux generators today; turrets/spawners later).
   const buildingsRef = useRef<Building[]>([]);
   const nextBuildingIdRef = useRef<number>(1);
-  const placingWallRef = useRef<boolean>(false);
-  const [isPlacingWall, setIsPlacingWall] = useState(false);
-  const previewWallRef = useRef<{ center: Vec2; valid: boolean } | null>(null);
+  // Flux currency. Generators add fractional flux every frame; the integer
+  // floor is mirrored to React state for the HUD pill (React skips re-renders
+  // when the value is identical, so this is effectively rate-limited to whole-
+  // flux changes — ~16/sec at the 8-generator cap).
+  const fluxRef = useRef<number>(0);
+  const [flux, setFlux] = useState<number>(0);
   // Dev-only: 'k' tags this each press; the frame loop consumes the flag
   // and damages whatever building/core sits under the cursor (10% of its
   // max HP). Lets us exercise the damage / game-over flows without having
@@ -206,6 +205,116 @@ export default function TankShooter() {
   const lastDamageSourceRef = useRef<string>("Unnamed Tank");
   // Real time (ms) when the current life started, for the death-screen Time stat.
   const lifeStartMsRef = useRef<number>(Date.now());
+
+  // === Placement modes ===
+  // The controller owns "which mode is active" + keyboard/click dispatch +
+  // mutual exclusion + game-over auto-exit. Each mode below supplies:
+  //   - key:        keyboard letter that toggles it
+  //   - canEnter:   gate that blocks entry (e.g., must have placed a core)
+  //   - sticky:     stay in mode after a successful drop (true = walls/flux,
+  //                 false = core which is one-shot per run)
+  //   - tick:       render the preview ghost + write the preview ref
+  //   - onClick:    perform the placement, return true if it happened
+  //   - onExit:     clean up the preview ref when the mode leaves
+  // Adding a new placement mode is one config entry — no new refs, no new
+  // key handler branches, no new mouse handler branches, no game-over cleanup.
+  const placement = usePlacementController(
+    {
+      core: {
+        key: 'c',
+        canEnter: () => !hasPlacedCoreRef.current,
+        sticky: false,
+        tick: (ctx, camera, mouseWorld) => {
+          const snapped = snapCoreCenter(mouseWorld.x, mouseWorld.y);
+          const v = validateCorePlacement(
+            snapped, coresRef.current, entitiesRef.current as any, MAP_WIDTH, MAP_HEIGHT,
+          );
+          previewCoreRef.current = { center: snapped, valid: v.valid };
+          drawCore(
+            ctx,
+            { pos: snapped, size: CORE_SIZE, teamId: LOCAL_PLAYER_TEAM },
+            camera,
+            { alpha: 0.45, invalid: !v.valid },
+          );
+        },
+        onClick: () => {
+          const p = previewCoreRef.current;
+          if (!p || !p.valid || hasPlacedCoreRef.current) return false;
+          coresRef.current = [
+            ...coresRef.current,
+            createCore(nextCoreIdRef.current++, p.center),
+          ];
+          hasPlacedCoreRef.current = true;
+          setHasPlacedCore(true);
+          return true;
+        },
+        onExit: () => { previewCoreRef.current = null; },
+      },
+      wall: {
+        key: 'v',
+        canEnter: () => hasPlacedCoreRef.current,
+        sticky: true,
+        tick: (ctx, camera, mouseWorld) => {
+          const snapped = snapBuildingCenter(mouseWorld.x, mouseWorld.y, WALL_GRID_CELLS);
+          const v = validateBuildingPlacement(
+            snapped, WALL_SIZE, coresRef.current, buildingsRef.current,
+            entitiesRef.current as any, LOCAL_PLAYER_TEAM,
+          );
+          const canAfford = fluxRef.current >= WALL_FLUX_COST;
+          const valid = v.valid && canAfford;
+          previewWallRef.current = { center: snapped, valid };
+          drawBuilding(
+            ctx,
+            { pos: snapped, size: WALL_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'wall' },
+            camera,
+            { alpha: 0.5, invalid: !valid },
+          );
+        },
+        onClick: () => {
+          const p = previewWallRef.current;
+          if (!p || !p.valid || fluxRef.current < WALL_FLUX_COST) return false;
+          fluxRef.current -= WALL_FLUX_COST;
+          buildingsRef.current = [
+            ...buildingsRef.current,
+            createWall(nextBuildingIdRef.current++, p.center),
+          ];
+          return true;
+        },
+        onExit: () => { previewWallRef.current = null; },
+      },
+      fluxgen: {
+        key: 'x',
+        canEnter: () => hasPlacedCoreRef.current,
+        sticky: true,
+        tick: (ctx, camera, mouseWorld) => {
+          const snapped = snapBuildingCenter(mouseWorld.x, mouseWorld.y, FLUX_GEN_GRID_CELLS);
+          const v = validateBuildingPlacement(
+            snapped, FLUX_GEN_SIZE, coresRef.current, buildingsRef.current,
+            entitiesRef.current as any, LOCAL_PLAYER_TEAM,
+            { kind: 'flux-generator', max: FLUX_GEN_MAX_COUNT },
+          );
+          previewFluxGenRef.current = { center: snapped, valid: v.valid };
+          drawBuilding(
+            ctx,
+            { pos: snapped, size: FLUX_GEN_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'flux-generator' },
+            camera,
+            { alpha: 0.5, invalid: !v.valid },
+          );
+        },
+        onClick: () => {
+          const p = previewFluxGenRef.current;
+          if (!p || !p.valid) return false;
+          buildingsRef.current = [
+            ...buildingsRef.current,
+            createFluxGenerator(nextBuildingIdRef.current++, p.center),
+          ];
+          return true;
+        },
+        onExit: () => { previewFluxGenRef.current = null; },
+      },
+    },
+    () => aliveRef.current && !coreDestroyedRef.current,
+  );
 
   // Seed a few entities on mount so something draws immediately.
   // Pass the actual tankPosRef so spawn placement respects SPAWN_SAFE_RADIUS
@@ -294,48 +403,11 @@ export default function TankShooter() {
     }
     function onDown(e: MouseEvent) {
       if (e.button !== 0) return; // left click only
-      // Placement mode hijacks left-click: try to drop the core at the
-      // previewed spot. Don't fall through to shooting or even arm
-      // mouseDownRef — otherwise releasing 'c' mid-hold would auto-fire.
-      if (placingCoreRef.current) {
-        const preview = previewCoreRef.current;
-        if (
-          preview &&
-          preview.valid &&
-          aliveRef.current &&
-          !coreDestroyedRef.current &&
-          !hasPlacedCoreRef.current
-        ) {
-          coresRef.current = [
-            ...coresRef.current,
-            createCore(nextCoreIdRef.current++, preview.center),
-          ];
-          hasPlacedCoreRef.current = true;
-          setHasPlacedCore(true);
-          // One core per run — exit placement and lock the 'c' keybind below.
-          placingCoreRef.current = false;
-          setIsPlacingCore(false);
-          previewCoreRef.current = null;
-        }
-        return;
-      }
-      if (placingWallRef.current) {
-        const preview = previewWallRef.current;
-        if (
-          preview &&
-          preview.valid &&
-          aliveRef.current &&
-          !coreDestroyedRef.current
-        ) {
-          buildingsRef.current = [
-            ...buildingsRef.current,
-            createWall(nextBuildingIdRef.current++, preview.center),
-          ];
-          // Stay in placement mode — let the player drop many walls in a
-          // row. Press 'v' again to exit. Preview will refresh next frame.
-        }
-        return;
-      }
+      // Placement mode hijacks left-click: the controller routes to the
+      // active mode's onClick. Returns true if a mode consumed the click
+      // (even if placement failed) so we don't fall through to shooting or
+      // arm mouseDownRef — releasing the mode key mid-hold would auto-fire.
+      if (placement.handleClick()) return;
       mouseDownRef.current = true;
       // Respect global cooldown
       if (cooldownRemainingRef.current <= 0) {
@@ -386,42 +458,11 @@ export default function TankShooter() {
     function onKeyDown(e: KeyboardEvent) {
       if (e.repeat) return;
       const k = e.key.toLowerCase();
-      if (k === 'c') {
-        // Toggle core placement mode. Disallowed while dead, after game-over,
-        // or once the player's one core has already been placed. Canceling
-        // an already-open placement is still allowed.
-        if (!aliveRef.current || coreDestroyedRef.current) return;
-        const next = !placingCoreRef.current;
-        if (next && hasPlacedCoreRef.current) return;
-        placingCoreRef.current = next;
-        setIsPlacingCore(next);
-        if (!next) previewCoreRef.current = null;
-        // Entering a placement mode cancels the other.
-        if (next && placingWallRef.current) {
-          placingWallRef.current = false;
-          setIsPlacingWall(false);
-          previewWallRef.current = null;
-        }
-        return;
-      }
-      if (k === 'v') {
-        // Toggle wall placement mode. Requires a placed core (no buildable
-        // zone exists otherwise). Stays open after each drop so the player
-        // can place many walls quickly; press 'v' again to exit.
-        if (!aliveRef.current || coreDestroyedRef.current) return;
-        const next = !placingWallRef.current;
-        if (next && !hasPlacedCoreRef.current) return;
-        placingWallRef.current = next;
-        setIsPlacingWall(next);
-        if (!next) previewWallRef.current = null;
-        // Entering a placement mode cancels the other.
-        if (next && placingCoreRef.current) {
-          placingCoreRef.current = false;
-          setIsPlacingCore(false);
-          previewCoreRef.current = null;
-        }
-        return;
-      }
+      // Placement-mode toggles (c/v/x) are routed through the controller.
+      // It handles mutual exclusion, canEnter gates, sticky/non-sticky exits,
+      // and game-over auto-disable. Returns true if `k` matched a registered
+      // mode (so we short-circuit the rest of the key handler).
+      if (placement.toggleByKey(k)) return;
       if (k === 'k') {
         // Dev: damage the structure under the cursor next frame.
         if (!aliveRef.current || coreDestroyedRef.current) return;
@@ -669,10 +710,9 @@ export default function TankShooter() {
             );
             setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
             setCoreDestroyed(true);
-            // Exit placement mode if it was open.
-            placingCoreRef.current = false;
-            setIsPlacingCore(false);
-            previewCoreRef.current = null;
+            // Exit any placement mode (controller fires each mode's onExit
+            // so preview refs are cleared).
+            placement.exitAll();
           }
         }
       }
@@ -693,6 +733,14 @@ export default function TankShooter() {
           const dead = new Set(deadBuildingIds);
           buildingsRef.current = buildingsRef.current.filter((b) => !dead.has(b.id));
         }
+      }
+      // Flux production. Sums every live friendly generator's per-frame yield
+      // (FLUX_GEN_RATE_PER_SECOND * dt) and accumulates into the float ref;
+      // the integer floor is mirrored to React state below for the HUD pill.
+      // Gated on alive / not-game-over so a destroyed core stops income even
+      // before its surviving generators fall.
+      if (aliveRef.current && !coreDestroyedRef.current && buildingsRef.current.length > 0) {
+        fluxRef.current += fluxProducedThisFrame(buildingsRef.current, LOCAL_PLAYER_TEAM, dt);
       }
       // Dev: 'k' damages whatever structure sits under the cursor by 10% of
       // its max HP. Buildings first (they sit visually on top of cores);
@@ -744,12 +792,7 @@ export default function TankShooter() {
             );
             setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
             setCoreDestroyed(true);
-            placingCoreRef.current = false;
-            setIsPlacingCore(false);
-            previewCoreRef.current = null;
-            placingWallRef.current = false;
-            setIsPlacingWall(false);
-            previewWallRef.current = null;
+            placement.exitAll();
           }
         }
       }
@@ -777,9 +820,12 @@ export default function TankShooter() {
       entsDraw(ctx, camera.width, camera.height, camera.x, camera.y, entitiesRef.current as any);
       entsDeathDraw(ctx, camera.width, camera.height, camera.x, camera.y);
 
-      // Buildable-zone outline: shown only while a placement mode is open,
-      // so the player can see where walls/future buildings are allowed.
-      if ((placingWallRef.current || (placingCoreRef.current && hasPlacedCoreRef.current))
+      // Buildable-zone outline: shown only while a building placement mode is
+      // open (walls or flux-gens), so the player can see where they can drop.
+      // Core mode never needs this since you can't enter core mode once a core
+      // is placed, and without a core there's no zone to outline.
+      const activeMode = placement.active();
+      if ((activeMode === 'wall' || activeMode === 'fluxgen')
           && aliveRef.current && !coreDestroyedRef.current) {
         for (const c of coresRef.current) {
           drawBuildableZone(ctx, c, camera);
@@ -793,50 +839,11 @@ export default function TankShooter() {
       for (const b of buildingsRef.current) {
         drawBuilding(ctx, b, camera, { showHp: true, hpRatio: b.hp / b.maxHp });
       }
-      // Core placement preview.
-      if (placingCoreRef.current && aliveRef.current && !coreDestroyedRef.current) {
-        const mwx = camera.x + mouseRef.current.x / zoom;
-        const mwy = camera.y + mouseRef.current.y / zoom;
-        const snapped = snapCoreCenter(mwx, mwy);
-        const validation = validateCorePlacement(
-          snapped,
-          coresRef.current,
-          entitiesRef.current as any,
-          MAP_WIDTH,
-          MAP_HEIGHT,
-        );
-        previewCoreRef.current = { center: snapped, valid: validation.valid };
-        drawCore(
-          ctx,
-          { pos: snapped, size: CORE_SIZE, teamId: LOCAL_PLAYER_TEAM },
-          camera,
-          { alpha: 0.45, invalid: !validation.valid },
-        );
-      } else if (previewCoreRef.current) {
-        previewCoreRef.current = null;
-      }
-      // Wall placement preview.
-      if (placingWallRef.current && aliveRef.current && !coreDestroyedRef.current) {
-        const mwx = camera.x + mouseRef.current.x / zoom;
-        const mwy = camera.y + mouseRef.current.y / zoom;
-        const snapped = snapBuildingCenter(mwx, mwy, 1);
-        const validation = validateWallPlacement(
-          snapped,
-          coresRef.current,
-          buildingsRef.current,
-          entitiesRef.current as any,
-          LOCAL_PLAYER_TEAM,
-        );
-        previewWallRef.current = { center: snapped, valid: validation.valid };
-        drawBuilding(
-          ctx,
-          { pos: snapped, size: WALL_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'wall' },
-          camera,
-          { alpha: 0.5, invalid: !validation.valid },
-        );
-      } else if (previewWallRef.current) {
-        previewWallRef.current = null;
-      }
+      // Per-mode preview rendering. The controller dispatches to the active
+      // mode's tick, which computes its snapped position, validates, writes
+      // its preview ref, and draws the ghost. Modes not active render nothing.
+      const cursorWorld = { x: camera.x + mouseRef.current.x / zoom, y: camera.y + mouseRef.current.y / zoom };
+      placement.tickActive(ctx, camera, cursorWorld);
 
       const bulletResult = updateBullets({
         bullets: bulletsRef.current,
@@ -929,6 +936,10 @@ export default function TankShooter() {
         pendingScoreRef.current = 0;
         setScore((prev) => prev + gain);
       }
+      // Mirror integer flux to state. setFlux with the same value is a React
+      // no-op, so this only triggers a HUD re-render at whole-flux boundaries
+      // (~16/sec at the 8-gen cap).
+      setFlux(Math.floor(fluxRef.current));
       requestAnimationFrame(frame);
     }
 
@@ -973,139 +984,51 @@ export default function TankShooter() {
     aliveRef.current = true;
   };
 
+  // Hint text is the one HUD bit that depends on placement state — derived
+  // from the controller's active-mode state (which re-renders on transition).
+  const activeMode = placement.activeMode;
+  const hint = activeMode === 'core'
+    ? "Left click to place core — press [C] to cancel"
+    : activeMode === 'wall'
+      ? `Left click to place wall (${WALL_FLUX_COST} flux) — press [V] to exit`
+      : activeMode === 'fluxgen'
+        ? "Left click to place flux generator — press [X] to exit"
+        : hasPlacedCore
+          ? "Left click to shoot · WASD to move · [V] walls · [X] flux generators"
+          : "Left click to shoot · WASD to move · [C] to place core";
+
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
       <canvas ref={canvasRef} style={{ display: "block" }} />
-      <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">
-        {isPlacingCore
-          ? "Left click to place core — press [C] to cancel"
-          : isPlacingWall
-            ? "Left click to place wall — press [V] to exit"
-            : hasPlacedCore
-              ? "Left click to shoot · WASD to move · [V] to place walls"
-              : "Left click to shoot · WASD to move · [C] to place core"}
-      </div>
-      <div id="hud-score-level" data-hud="score-level" className="hud-score-level">
-        <div className="hud-pill hud-pill-score">
-          <div className="hud-pill-fill score" />
-          <span className="hud-dot score" />
-          <span className="hud-text">Score: {score}</span>
-        </div>
-        <div className="hud-pill hud-pill-level">
-          <div
-            className="hud-pill-fill level"
-            style={{ width: `${Math.min(100, (playerProgress.xp / Math.max(1, xpForNextLevel(playerProgress.level))) * 100)}%` }}
-          />
-          <span className="hud-dot level" />
-          <span className="hud-text">Lvl {playerProgress.level} Tank</span>
-        </div>
-      </div>
-      <div
-        id="hud-stats"
-        data-hud="stats"
-        className={`hud-stats${availableSkillPoints(playerProgress.level, playerStats) === 0 ? " hud-stats--idle" : ""}`}
-      >
-        <div className="hud-stats-wrap">
-          <div className="hud-skill-points">
-            x{availableSkillPoints(playerProgress.level, playerStats)}
-          </div>
-          {STAT_ORDER.map((key, idx) => {
-            const value = playerStats[key];
-            const color = STAT_COLORS[key];
-            const maxed = value >= MAX_STAT_POINTS;
-            const fillPct = (value / MAX_STAT_POINTS) * 100;
-            return (
-              <div
-                key={key}
-                className={`hud-stat-row${maxed ? " maxed" : ""}`}
-                style={{
-                  ["--stat-color" as string]: color,
-                  ["--stat-segments" as string]: MAX_STAT_POINTS,
-                }}
-              >
-                <div className="hud-stat-bar">
-                  <div className="hud-stat-track">
-                    <div
-                      className="hud-stat-fill"
-                      style={{ width: `${fillPct}%`, background: color }}
-                    />
-                    <div className="hud-stat-segments">
-                      {Array.from({ length: MAX_STAT_POINTS }, (_, i) => (
-                        <div key={i} className="hud-stat-segment" />
-                      ))}
-                    </div>
-                  </div>
-                  <span className="hud-stat-label">{STAT_LABELS[key]}</span>
-                  <span className="hud-stat-key">[{idx + 1}]</span>
-                </div>
-                <div className="hud-stat-value">
-                  {maxed ? "MAX" : `+${value}`}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <Hud
+        hint={hint}
+        score={score}
+        flux={flux}
+        level={playerProgress.level}
+        xp={playerProgress.xp}
+        stats={playerStats}
+      />
       {isDead && deathInfo && !coreDestroyed && (
-        <div className="death-overlay">
-          <div className="death-panel">
-            <div className="death-killed-by">You were killed by</div>
-            <div className="death-killer-name">{deathInfo.killerName}</div>
-            <div className="death-stats">
-              <div className="death-stat-row">
-                <span className="death-stat-label">Score:</span>
-                <span className="death-stat-value">{deathInfo.score}</span>
-              </div>
-              <div className="death-stat-row">
-                <span className="death-stat-label">Level:</span>
-                <span className="death-stat-value">{deathInfo.level}</span>
-              </div>
-              <div className="death-stat-row">
-                <span className="death-stat-label">Time:</span>
-                <span className="death-stat-value">
-                  {deathInfo.timeSeconds >= 60
-                    ? `${Math.floor(deathInfo.timeSeconds / 60)}m ${deathInfo.timeSeconds % 60}s`
-                    : `${deathInfo.timeSeconds}s`}
-                </span>
-              </div>
-            </div>
-          </div>
-          <button className="death-respawn-btn" onClick={handleRespawn}>
-            Respawn
-          </button>
-        </div>
+        <EndOverlay
+          title="You were killed by"
+          subtitle={deathInfo.killerName}
+          score={deathInfo.score}
+          level={deathInfo.level}
+          timeSeconds={deathInfo.timeSeconds}
+          buttonLabel="Respawn"
+          onButtonClick={handleRespawn}
+        />
       )}
       {coreDestroyed && coreDestroyedInfo && (
-        <div className="death-overlay">
-          <div className="death-panel">
-            <div className="death-killed-by">Game Over</div>
-            <div className="death-killer-name">Core Destroyed</div>
-            <div className="death-stats">
-              <div className="death-stat-row">
-                <span className="death-stat-label">Score:</span>
-                <span className="death-stat-value">{coreDestroyedInfo.score}</span>
-              </div>
-              <div className="death-stat-row">
-                <span className="death-stat-label">Level:</span>
-                <span className="death-stat-value">{coreDestroyedInfo.level}</span>
-              </div>
-              <div className="death-stat-row">
-                <span className="death-stat-label">Time:</span>
-                <span className="death-stat-value">
-                  {coreDestroyedInfo.timeSeconds >= 60
-                    ? `${Math.floor(coreDestroyedInfo.timeSeconds / 60)}m ${coreDestroyedInfo.timeSeconds % 60}s`
-                    : `${coreDestroyedInfo.timeSeconds}s`}
-                </span>
-              </div>
-            </div>
-          </div>
-          <button
-            className="death-respawn-btn"
-            onClick={() => window.location.reload()}
-          >
-            Restart
-          </button>
-        </div>
+        <EndOverlay
+          title="Game Over"
+          subtitle="Core Destroyed"
+          score={coreDestroyedInfo.score}
+          level={coreDestroyedInfo.level}
+          timeSeconds={coreDestroyedInfo.timeSeconds}
+          buttonLabel="Restart"
+          onButtonClick={() => window.location.reload()}
+        />
       )}
     </div>
   );

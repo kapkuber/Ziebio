@@ -7,12 +7,11 @@ import {
   computeEntityCollisionRadius,
   triangleWorldVerts,
   pentagonWorldVerts,
-  circleIntersectsTriangle,
-  circleIntersectsPolygon,
   ENTITY_COLLISION_INSET,
   HIT_FLASH_DURATION,
   ENTITY_BOUNCE,
 } from "./entities";
+import { circleIntersectsTriangle, circleIntersectsPolygon } from "./geometry";
 import { BULLET_RADIUS } from "./tank";
 import type { CameraInfo } from "./config";
 import { SHAPE_BASE_DAMAGE, TICK_DURATION } from "./stats";

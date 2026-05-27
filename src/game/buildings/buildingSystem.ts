@@ -1,22 +1,81 @@
-// Buildings: structures the player builds inside their core's buildable
-// zone. Walls today; turrets/generators/spawners follow the same pattern.
+// Building manager. Owns the shared types every building kind conforms to,
+// the kind-agnostic placement/collision/draw pipelines, and the registry that
+// the per-kind modules (./wall, ./fluxGenerator, ...) plug into.
+//
+// Adding a new building kind is two steps:
+//   1. Create ./<kind>.ts exporting constants, a factory, and a BuildingDef.
+//   2. Import the def here and add it to BUILDING_DEFS below.
+// No changes to validation, collisions, or the draw dispatcher are needed.
 //
 // Per CLAUDE.md: every building carries a teamId and reads its accent via
 // getTeamPalette(teamId). Friend/foe is determined by teamId; ownerId is
-// reserved for per-player attribution (e.g. "max N buildings per player").
+// reserved for per-player attribution.
 
-import { GRID_SIZE } from './config';
-import { aabbCircleMTV } from './core';
-import type { Core } from './core';
-import type { GameEntity, Vec2 } from './entities';
-import { drawInnerHpBar } from './hpBar';
-import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
+import { GRID_SIZE } from '../config';
+import type { Core } from '../core';
+import type { GameEntity, Vec2 } from '../entities';
+import { aabbCircleMTV } from '../geometry';
+import { drawInnerHpBar } from '../hpBar';
+import { getTeamPalette, type TeamId } from '../teams';
+
+import { WALL_DEF } from './wall';
+import { FLUX_GEN_DEF } from './fluxGenerator';
+
+// === Shared types ===
+
+export type BuildingKind = 'wall' | 'flux-generator';
+
+export interface Building {
+  id: number;
+  kind: BuildingKind;
+  pos: Vec2;       // center
+  size: number;    // px (square side length)
+  hp: number;
+  maxHp: number;
+  ownerId: number;
+  teamId: TeamId;
+}
+
+// Per-kind contract used by cross-kind logic. Anything kind-specific that the
+// MANAGER needs goes here. Kind-internal constants (flux cost, max-count,
+// production rate, etc.) stay as exports on the per-kind module and are
+// imported directly by callers that care.
+export interface BuildingDef {
+  kind: BuildingKind;
+  gridCells: number;
+  size: number;                 // gridCells * GRID_SIZE
+  maxHp: number;
+  bodyDamageToEntity: number;   // dealt to polygons per second of overlap
+  bodyDamageFromEntity: number; // taken from polygons per second of overlap
+  // Renders the kind-specific interior. The shared chassis plate and HP bar
+  // are drawn by the manager; the caller has translated the canvas origin
+  // to the building center and set a default stroke style/width.
+  drawInterior: (
+    ctx: CanvasRenderingContext2D,
+    size: number,
+    accent: string,
+    accentDim: string,
+    invalid: boolean,
+  ) => void;
+}
+
+// === Per-kind registry ===
+// Explicit object so adding a kind is one new entry — no side-effect
+// registration, no load-order surprises.
+export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
+  'wall': WALL_DEF,
+  'flux-generator': FLUX_GEN_DEF,
+};
+
+export function getBuildingDef(kind: BuildingKind): BuildingDef {
+  return BUILDING_DEFS[kind];
+}
 
 // === Buildable zone ===
 // Number of grid cells of buildable space extending OUT from each side of
-// the core. With CORE_GRID_CELLS = 4 and 25 cells per side, the total
-// buildable square is 4 + 2*25 = 54 cells on a side, centered on the core.
-export const BUILDABLE_CELLS_FROM_CORE = 25;
+// the core. With CORE_GRID_CELLS = 4 and BUILDABLE_CELLS_FROM_CORE cells per
+// side, the total buildable square is 4 + 2*N cells, centered on the core.
+export const BUILDABLE_CELLS_FROM_CORE = 35;
 
 export interface BuildableZone {
   minX: number;
@@ -36,75 +95,30 @@ export function getBuildableZone(core: Pick<Core, 'pos' | 'size'>): BuildableZon
   };
 }
 
-// === Wall constants ===
-export const WALL_GRID_CELLS = 1;
-export const WALL_SIZE = WALL_GRID_CELLS * GRID_SIZE; // 25 px square
-export const WALL_MAX_HP = 100;
-
-// Continuous-contact damage exchange — same model as core vs polygons.
-// Walls hit harder per second than the core (they're meant to grind small
-// shapes down) but die faster since they're cheaper to build.
-export const WALL_BODY_DAMAGE_TO_ENTITY = 45;
-export const WALL_BODY_DAMAGE_FROM_ENTITY = 6;
-
-// === Building type ===
-// Single shape for now. When turrets/generators/etc. arrive, either widen
-// the `kind` union and let drawBuilding switch on it, or split into a
-// tagged union if the per-kind fields diverge significantly.
-export type BuildingKind = 'wall';
-
-export interface Building {
-  id: number;
-  kind: BuildingKind;
-  pos: Vec2;       // center
-  size: number;    // px (square side length)
-  hp: number;
-  maxHp: number;
-  ownerId: number;
-  teamId: TeamId;
-}
-
-export function createWall(
-  id: number,
-  center: Vec2,
-  teamId: TeamId = LOCAL_PLAYER_TEAM,
-  ownerId: number = 0,
-): Building {
-  return {
-    id,
-    kind: 'wall',
-    pos: { x: center.x, y: center.y },
-    size: WALL_SIZE,
-    hp: WALL_MAX_HP,
-    maxHp: WALL_MAX_HP,
-    ownerId,
-    teamId,
-  };
-}
-
-// Snap a world coordinate to the CENTER of the nearest GRID_SIZE cell.
-// Works for any odd-cell-count building (1×1, 3×3, 5×5...).
+// Snap a world coordinate to the CENTER of the nearest GRID_SIZE-aligned
+// footprint of `cellsPerSide` cells. Works for any cell count.
 export function snapBuildingCenter(x: number, y: number, cellsPerSide: number = 1): Vec2 {
   const sizePx = cellsPerSide * GRID_SIZE;
   const half = sizePx / 2;
-  // For even cells, top-left snaps to grid; for odd cells, center sits
-  // on a cell center. Same formula either way because we add `half`.
   const tlx = Math.round((x - half) / GRID_SIZE) * GRID_SIZE;
   const tly = Math.round((y - half) / GRID_SIZE) * GRID_SIZE;
   return { x: tlx + half, y: tly + half };
 }
 
 // === Placement validation ===
-export type WallPlacementReason =
+// Kind-agnostic — caller passes the footprint size and (optionally) a per-kind
+// instance cap. New building kinds reuse this directly; no new validator per kind.
+export type BuildingPlacementReason =
   | 'ok'
   | 'outside-zone'
   | 'core-overlap'
   | 'building-overlap'
-  | 'entity-overlap';
+  | 'entity-overlap'
+  | 'max-reached';
 
-export interface WallPlacementValidation {
+export interface BuildingPlacementValidation {
   valid: boolean;
-  reason: WallPlacementReason;
+  reason: BuildingPlacementReason;
 }
 
 function aabbsOverlap(
@@ -114,14 +128,26 @@ function aabbsOverlap(
   return aMaxX > bMinX && aMinX < bMaxX && aMaxY > bMinY && aMinY < bMaxY;
 }
 
-export function validateWallPlacement(
+export function validateBuildingPlacement(
   center: Vec2,
+  size: number,
   cores: Core[],
   buildings: Building[],
   entities: GameEntity[],
   teamId: TeamId,
-): WallPlacementValidation {
-  const half = WALL_SIZE / 2;
+  maxOfKind?: { kind: BuildingKind; max: number },
+): BuildingPlacementValidation {
+  // Per-kind instance cap. Checked first so the player gets clear feedback
+  // before any geometry probing.
+  if (maxOfKind) {
+    let count = 0;
+    for (const b of buildings) {
+      if (b.kind === maxOfKind.kind && b.teamId === teamId) count++;
+    }
+    if (count >= maxOfKind.max) return { valid: false, reason: 'max-reached' };
+  }
+
+  const half = size / 2;
   const wMinX = center.x - half;
   const wMaxX = center.x + half;
   const wMinY = center.y - half;
@@ -174,7 +200,8 @@ export function validateWallPlacement(
 
 // === Collisions ===
 // Same continuous-contact model as cores: polygons get pushed + take/deal
-// reciprocal damage. Returns IDs of buildings that died this tick.
+// reciprocal damage. Per-kind damage values come from BUILDING_DEFS. Returns
+// IDs of buildings that died this tick.
 export function resolveBuildingEntityCollisions(
   buildings: Building[],
   entities: GameEntity[],
@@ -200,8 +227,9 @@ export function resolveBuildingEntityCollisions(
       e.kick.x += mtv.nx * KICK;
       e.kick.y += mtv.ny * KICK;
 
-      e.hp = Math.max(0, e.hp - WALL_BODY_DAMAGE_TO_ENTITY * dt);
-      b.hp = Math.max(0, b.hp - WALL_BODY_DAMAGE_FROM_ENTITY * dt);
+      const def = getBuildingDef(b.kind);
+      e.hp = Math.max(0, e.hp - def.bodyDamageToEntity * dt);
+      b.hp = Math.max(0, b.hp - def.bodyDamageFromEntity * dt);
       if (b.hp <= 0) deadIds.push(b.id);
       if (e.hp <= 0) {
         onEntityKilled(e);
@@ -213,7 +241,7 @@ export function resolveBuildingEntityCollisions(
   return deadIds;
 }
 
-// Push the tank out of any building it overlaps. Walls block movement but
+// Push the tank out of any building it overlaps. Buildings block movement but
 // deal no damage to friendlies (matches the core's behavior).
 export function resolvePlayerBuildingCollisions(
   buildings: Building[],
@@ -241,7 +269,7 @@ export function resolvePlayerBuildingCollisions(
 }
 
 // === Rendering ===
-interface DrawBuildingOptions {
+export interface DrawBuildingOptions {
   alpha?: number;     // < 1 = preview / ghost
   invalid?: boolean;  // red tint for invalid placement
   showHp?: boolean;
@@ -265,30 +293,26 @@ export function drawBuilding(
   const palette = getTeamPalette(building.teamId);
   const plateFill = invalid ? '#d8a8a8' : '#a1a3a6';
   const accent = invalid ? '#e07070' : palette.accent;
+  const accentDim = invalid ? '#7a4747' : palette.accentDim;
 
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.translate(sx, sy);
   ctx.strokeStyle = '#575757';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 3.5;
 
-  // Plate
+  // Shared chassis plate.
   ctx.fillStyle = plateFill;
   ctx.beginPath();
   ctx.rect(-half, -half, building.size, building.size);
   ctx.fill();
   ctx.stroke();
 
-  // Small team accent in the center so even tiny walls read as friend/foe.
-  const dotR = building.size * 0.22;
-  ctx.fillStyle = accent;
-  ctx.beginPath();
-  ctx.arc(0, 0, dotR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
+  // Per-kind interior. The def encapsulates everything kind-specific about
+  // the visual; this dispatch is the single point of variance.
+  getBuildingDef(building.kind).drawInterior(ctx, building.size, accent, accentDim, invalid);
 
-  // Inner HP bar — shared with cores and all future buildings. Sits flush
-  // at the bottom interior so adjacent stacked tiles can't cover it.
+  // Inner HP bar — shared with cores and all future buildings.
   if (options.showHp && options.hpRatio !== undefined) {
     drawInnerHpBar(ctx, building.size, options.hpRatio);
   }

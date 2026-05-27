@@ -2,11 +2,12 @@
 // polygons, and when destroyed ends the run.
 import { GRID_SIZE } from './config';
 import type { GameEntity, Vec2 } from './entities';
+import { aabbCircleMTV } from './geometry';
 import { drawInnerHpBar } from './hpBar';
 import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
 
-export const CORE_GRID_CELLS = 4;
-export const CORE_SIZE = CORE_GRID_CELLS * GRID_SIZE; // 125 px square
+export const CORE_GRID_CELLS = 8;
+export const CORE_SIZE = CORE_GRID_CELLS * GRID_SIZE;
 
 export const CORE_MAX_HP = 1000;
 
@@ -19,7 +20,7 @@ export const CORE_MIN_SEPARATION = CORE_SIZE * 15;
 // get red accents, green-team cores get green accents, etc.
 export const CORE_PLATE_FILL = '#909295';
 export const CORE_OUTLINE = '#575757';
-const CORE_OUTLINE_WIDTH = 3; // slightly thinner than polygons; structures read as static
+const CORE_OUTLINE_WIDTH = 3.5; // slightly thinner than polygons; structures read as static
 
 // Reciprocal body damage on overlap. Same continuous-contact model as the
 // player vs polygons — applied every overlap tick, scaled by dt.
@@ -108,40 +109,6 @@ export function validateCorePlacement(
     }
   }
   return { valid: true, reason: 'ok' };
-}
-
-// MTV (minimum translation vector) for a circle of radius r at (cx, cy)
-// overlapping an AABB. Returns null if no overlap. The normal points from
-// the closest AABB point toward the circle center; when the center sits
-// inside the AABB it ejects along the shortest face axis.
-export function aabbCircleMTV(
-  rectMinX: number,
-  rectMinY: number,
-  rectMaxX: number,
-  rectMaxY: number,
-  cx: number,
-  cy: number,
-  r: number,
-): { nx: number; ny: number; pen: number } | null {
-  const closestX = Math.max(rectMinX, Math.min(cx, rectMaxX));
-  const closestY = Math.max(rectMinY, Math.min(cy, rectMaxY));
-  const dx = cx - closestX;
-  const dy = cy - closestY;
-  const d2 = dx * dx + dy * dy;
-  if (d2 >= r * r) return null;
-  if (d2 > 1e-6) {
-    const d = Math.sqrt(d2);
-    return { nx: dx / d, ny: dy / d, pen: r - d };
-  }
-  const exitL = cx - rectMinX;
-  const exitR = rectMaxX - cx;
-  const exitT = cy - rectMinY;
-  const exitB = rectMaxY - cy;
-  const exit = Math.min(exitL, exitR, exitT, exitB);
-  if (exit === exitL) return { nx: -1, ny: 0, pen: r + exit };
-  if (exit === exitR) return { nx: 1, ny: 0, pen: r + exit };
-  if (exit === exitT) return { nx: 0, ny: -1, pen: r + exit };
-  return { nx: 0, ny: 1, pen: r + exit };
 }
 
 // Push polygons out of any live core's AABB and apply reciprocal contact
@@ -287,7 +254,7 @@ export function drawCore(
 
   ctx.fillStyle = '#a1a3a6';
   ctx.strokeStyle = CORE_OUTLINE;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 3;
   for (const verts of panels) {
     ctx.beginPath();
     ctx.moveTo(verts[0][0], verts[0][1]);
