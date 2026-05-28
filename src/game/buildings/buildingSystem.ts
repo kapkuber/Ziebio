@@ -16,6 +16,7 @@ import type { Core } from '../core';
 import type { GameEntity, Vec2 } from '../entities';
 import { aabbCircleMTV } from '../geometry';
 import { drawInnerHpBar } from '../hpBar';
+import type { Bullet } from '../tank';
 import { getTeamPalette, type TeamId } from '../teams';
 
 import { WALL_DEF } from './wall';
@@ -246,6 +247,36 @@ export function resolveBuildingEntityCollisions(
         entities.splice(ei, 1);
         break;
       }
+    }
+  }
+  return deadIds;
+}
+
+// Hostile bullets vs buildings. Each overlapping bullet dies on impact and
+// the building takes the bullet's full damage. Bullets of the same team pass
+// through (no friendly fire). Returns IDs of buildings that died this tick
+// so the caller can filter, matching the resolveBuildingEntityCollisions
+// pattern.
+export function resolveBuildingBulletCollisions(
+  buildings: Building[],
+  bullets: Bullet[],
+): number[] {
+  if (!buildings.length || !bullets.length) return [];
+  const deadIds: number[] = [];
+  for (const b of bullets) {
+    if (b.life <= 0) continue;
+    for (const bld of buildings) {
+      if (bld.hp <= 0 || bld.teamId === b.teamId) continue;
+      const half = bld.size * 0.5;
+      const closestX = Math.max(bld.pos.x - half, Math.min(b.pos.x, bld.pos.x + half));
+      const closestY = Math.max(bld.pos.y - half, Math.min(b.pos.y, bld.pos.y + half));
+      const dx = b.pos.x - closestX;
+      const dy = b.pos.y - closestY;
+      if (dx * dx + dy * dy > b.radius * b.radius) continue;
+      bld.hp = Math.max(0, bld.hp - b.damage);
+      b.life = 0;
+      if (bld.hp <= 0) deadIds.push(bld.id);
+      break; // one bullet only hits one building
     }
   }
   return deadIds;

@@ -55,6 +55,7 @@ import {
   CORE_SIZE,
   createCore,
   drawCore,
+  resolveCoreBulletCollisions,
   resolveCoreEntityCollisions,
   resolvePlayerCoreCollisions,
   snapCoreCenter,
@@ -78,6 +79,7 @@ import {
   drawBuilding,
   drawBuildableZone,
   fluxProducedThisFrame,
+  resolveBuildingBulletCollisions,
   resolveBuildingEntityCollisions,
   resolvePlayerBuildingCollisions,
   snapBuildingCenter,
@@ -87,6 +89,15 @@ import {
   type TurretTarget,
 } from "./game/buildings";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
+import {
+  createEnemy,
+  drawEnemy,
+  resolveBulletPlayerCollisions,
+  resolveEnemyBulletCollisions,
+  resolvePlayerEnemyCollisions,
+  updateEnemies,
+  type Enemy,
+} from "./game/enemies";
 import { Hud } from "./components/Hud";
 import { EndOverlay } from "./components/EndOverlay";
 import { usePlacementController } from "./hooks/usePlacementController";
@@ -186,6 +197,13 @@ export default function TankShooter() {
   // max HP). Lets us exercise the damage / game-over flows without having
   // to lure polygons onto every test target.
   const pendingDevDamageRef = useRef<boolean>(false);
+  // Dev-only: 'p' tags this each press; the frame loop consumes the flag
+  // and spawns a single swarm enemy at the cursor's world position. Lives
+  // here until the real wave system lands so the AI / damage / rendering
+  // path can be exercised one enemy at a time.
+  const pendingSwarmSpawnRef = useRef<boolean>(false);
+  const enemiesRef = useRef<Enemy[]>([]);
+  const nextEnemyIdRef = useRef<number>(1);
   // Game-over (core destroyed) state. Ref drives the loop, state drives JSX.
   const coreDestroyedRef = useRef<boolean>(false);
   const [coreDestroyed, setCoreDestroyed] = useState(false);
@@ -510,6 +528,12 @@ export default function TankShooter() {
         pendingDevDamageRef.current = true;
         return;
       }
+      if (k === 'p') {
+        // Dev: spawn a single swarm enemy at the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingSwarmSpawnRef.current = true;
+        return;
+      }
       if (k === 'm') {
         const current = playerProgressRef.current;
         if (current.level < MAX_LEVEL) {
@@ -783,13 +807,79 @@ export default function TankShooter() {
       if (aliveRef.current && !coreDestroyedRef.current && buildingsRef.current.length > 0) {
         fluxRef.current += fluxProducedThisFrame(buildingsRef.current, LOCAL_PLAYER_TEAM, dt);
       }
-      // Turret aim + fire. Target list is assembled per frame — only hostile
-      // tanks and (future) wave enemies belong here. Polygons are world
-      // resources, NOT turret targets, so they're intentionally absent.
-      // Today the list is empty (single-player MVP has no hostile players);
-      // when wave enemies / enemy tanks land, push their { pos, teamId } here.
+      // Wave enemies. Pathing + firing + building gap + core-contact damage
+      // live inside each kind's update fn (see ./game/enemies). Player-vs-
+      // enemy and bullet-vs-enemy are separate passes below so they fit into
+      // the existing damage / death pipeline.
+      if (enemiesRef.current.length > 0) {
+        updateEnemies(enemiesRef.current, {
+          cores: coresRef.current,
+          buildings: buildingsRef.current,
+          bullets: bulletsRef.current,
+          bulletIdRef,
+          playerPos: aliveRef.current ? tankPosRef.current : null,
+          playerTeamId: LOCAL_PLAYER_TEAM,
+          dt,
+        });
+        // Game-over check — an enemy can finish off a core just like a
+        // polygon. Mirrors the polygon-vs-core game-over trigger.
+        if (
+          !coreDestroyedRef.current &&
+          hasPlacedCoreRef.current &&
+          coresRef.current.some((c) => c.hp <= 0)
+        ) {
+          coresRef.current = coresRef.current.filter((c) => c.hp > 0);
+          if (coresRef.current.length === 0) {
+            coreDestroyedRef.current = true;
+            aliveRef.current = false;
+            const finalLevel = playerProgressRef.current.level;
+            const finalScore = score + pendingScoreRef.current;
+            const timeSeconds = Math.max(
+              0,
+              Math.floor((Date.now() - lifeStartMsRef.current) / 1000),
+            );
+            setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
+            setCoreDestroyed(true);
+            placement.exitAll();
+          }
+        }
+      }
+      // Player-vs-enemy contact: reciprocal continuous body damage + push.
+      // Mirrors the polygon-vs-tank pipeline so HP, hit flash, and kill
+      // attribution all match. Kill attribution uses the enemy kind name.
+      if (enemiesRef.current.length > 0 && aliveRef.current) {
+        const speed = Math.hypot(tankVelRef.current.x, tankVelRef.current.y);
+        const impact = impactMultiplierFromSpeed(speed);
+        const hits = resolvePlayerEnemyCollisions(
+          enemiesRef.current,
+          tankPosRef.current,
+          tankVelRef.current,
+          LOCAL_PLAYER_TEAM,
+          tankRadius,
+          derived.bodyDamageTank,
+          impact,
+          tankHpRef.current,
+          dt,
+        );
+        for (const hit of hits) {
+          if (hit.tankDamage > 0) {
+            tankHpRef.current = Math.max(0, tankHpRef.current - hit.tankDamage);
+            tankHitTRef.current = HIT_FLASH_DURATION;
+            tookDamage = true;
+            lastDamageSourceRef.current =
+              hit.enemy.kind.charAt(0).toUpperCase() + hit.enemy.kind.slice(1);
+          }
+        }
+      }
+      // Turret aim + fire. Target list is hostile tanks + wave enemies —
+      // polygons are world resources, not threats, so they're intentionally
+      // absent.
       if (buildingsRef.current.length > 0) {
         const turretTargets: TurretTarget[] = [];
+        for (const e of enemiesRef.current) {
+          if (e.hp <= 0) continue;
+          turretTargets.push({ pos: e.pos, teamId: e.teamId });
+        }
         updateTurrets(
           buildingsRef.current,
           bulletsRef.current,
@@ -797,6 +887,19 @@ export default function TankShooter() {
           dt,
           turretTargets,
         );
+      }
+      // Dev: 'p' spawns a single swarm at the cursor's world position. The
+      // wave system will eventually take over enemy spawning; this hotkey
+      // lives here so the AI / damage / rendering path can be exercised one
+      // enemy at a time without the wave scaffolding.
+      if (pendingSwarmSpawnRef.current && aliveRef.current && !coreDestroyedRef.current) {
+        pendingSwarmSpawnRef.current = false;
+        const mwx = camera.x + mouseRef.current.x / zoom;
+        const mwy = camera.y + mouseRef.current.y / zoom;
+        enemiesRef.current = [
+          ...enemiesRef.current,
+          createEnemy(nextEnemyIdRef.current++, 'swarm', { x: mwx, y: mwy }),
+        ];
       }
       // Dev: 'k' damages whatever structure sits under the cursor by 10% of
       // its max HP. Buildings first (they sit visually on top of cores);
@@ -877,11 +980,14 @@ export default function TankShooter() {
       entsDeathDraw(ctx, camera.width, camera.height, camera.x, camera.y);
 
       // Buildable-zone outline: shown only while a building placement mode is
-      // open (walls or flux-gens), so the player can see where they can drop.
-      // Core mode never needs this since you can't enter core mode once a core
-      // is placed, and without a core there's no zone to outline.
+      // open, so the player can see where they can drop. Any non-core
+      // placement mode needs the outline (every building lives inside the
+      // zone); core itself never needs it — you can't enter core mode once
+      // a core is placed, and without a core there's no zone to outline.
+      // Using `!== 'core'` instead of listing each building mode means new
+      // placement modes pick this up automatically.
       const activeMode = placement.active();
-      if ((activeMode === 'wall' || activeMode === 'fluxgen')
+      if (activeMode !== null && activeMode !== 'core'
           && aliveRef.current && !coreDestroyedRef.current) {
         for (const c of coresRef.current) {
           drawBuildableZone(ctx, c, camera);
@@ -894,6 +1000,11 @@ export default function TankShooter() {
       // Draw all buildings.
       for (const b of buildingsRef.current) {
         drawBuilding(ctx, b, camera, { showHp: true, hpRatio: b.hp / b.maxHp });
+      }
+      // Draw enemies after buildings so they read on top of the chassis but
+      // below bullets/the player tank (which render later in the frame).
+      for (const e of enemiesRef.current) {
+        drawEnemy(ctx, e, camera);
       }
       // Per-mode preview rendering. The controller dispatches to the active
       // mode's tick, which computes its snapped position, validates, writes
@@ -921,6 +1032,84 @@ export default function TankShooter() {
       bulletsRef.current = bulletResult.bullets;
       entitiesRef.current = bulletResult.entities as any;
       spawnsThisFrameRef.current = bulletResult.spawnsThisFrame;
+
+      // Bullet-vs-structure passes run BEFORE bullet-vs-enemy / bullet-vs-
+      // player so a bullet that hits a wall dies on the wall instead of
+      // punching through to whatever's behind it. Each pass team-filters via
+      // teamId (no friendly fire).
+      if (buildingsRef.current.length > 0 && bulletsRef.current.length > 0) {
+        const deadBuildingIds = resolveBuildingBulletCollisions(
+          buildingsRef.current,
+          bulletsRef.current,
+        );
+        if (deadBuildingIds.length > 0) {
+          const dead = new Set(deadBuildingIds);
+          buildingsRef.current = buildingsRef.current.filter((b) => !dead.has(b.id));
+        }
+      }
+      if (coresRef.current.length > 0 && bulletsRef.current.length > 0) {
+        const deadCoreIds = resolveCoreBulletCollisions(
+          coresRef.current,
+          bulletsRef.current,
+        );
+        if (deadCoreIds.length > 0) {
+          const dead = new Set(deadCoreIds);
+          coresRef.current = coresRef.current.filter((c) => !dead.has(c.id));
+          // Same game-over trigger the polygon / enemy paths use — fires once
+          // when the last placed core falls.
+          if (
+            !coreDestroyedRef.current &&
+            hasPlacedCoreRef.current &&
+            coresRef.current.length === 0
+          ) {
+            coreDestroyedRef.current = true;
+            aliveRef.current = false;
+            const finalLevel = playerProgressRef.current.level;
+            const finalScore = score + pendingScoreRef.current;
+            const timeSeconds = Math.max(
+              0,
+              Math.floor((Date.now() - lifeStartMsRef.current) / 1000),
+            );
+            setCoreDestroyedInfo({ level: finalLevel, score: finalScore, timeSeconds });
+            setCoreDestroyed(true);
+            placement.exitAll();
+          }
+        }
+      }
+
+      // Bullet-vs-enemy runs AFTER the bullet/entity pipeline so a bullet
+      // that already died on a polygon this frame can't also hit an enemy.
+      // Dead enemies are filtered next.
+      if (enemiesRef.current.length > 0 && bulletsRef.current.length > 0) {
+        resolveEnemyBulletCollisions(enemiesRef.current, bulletsRef.current, dt);
+      }
+      if (enemiesRef.current.some((e) => e.hp <= 0)) {
+        enemiesRef.current = enemiesRef.current.filter((e) => e.hp > 0);
+      }
+
+      // Hostile bullets damaging the player. Any bullet whose teamId differs
+      // from the local player's hits the tank on overlap and dies. Sources
+      // include wave enemies today (and any future hostile turret fed by the
+      // same bullet list).
+      if (bulletsRef.current.length > 0 && aliveRef.current) {
+        const hits = resolveBulletPlayerCollisions(
+          bulletsRef.current,
+          tankPosRef.current,
+          LOCAL_PLAYER_TEAM,
+          tankRadius,
+        );
+        if (hits.length > 0) {
+          // Bullets are marked life=0 inside resolve; cull them now so they
+          // don't render or carry into the next frame.
+          bulletsRef.current = bulletsRef.current.filter((b) => b.life > 0);
+          for (const hit of hits) {
+            tankHpRef.current = Math.max(0, tankHpRef.current - hit.damage);
+            tankHitTRef.current = HIT_FLASH_DURATION;
+            tookDamage = true;
+            lastDamageSourceRef.current = 'Swarm Bullet';
+          }
+        }
+      }
 
       renderBullets(ctx, bulletsRef.current, camera);
       const mouseWorld = { x: mouseRef.current.x / zoom, y: mouseRef.current.y / zoom };

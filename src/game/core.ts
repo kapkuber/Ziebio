@@ -4,6 +4,7 @@ import { GRID_SIZE } from './config';
 import type { GameEntity, Vec2 } from './entities';
 import { aabbCircleMTV } from './geometry';
 import { drawInnerHpBar } from './hpBar';
+import type { Bullet } from './tank';
 import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
 
 export const CORE_GRID_CELLS = 8;
@@ -148,6 +149,36 @@ export function resolveCoreEntityCollisions(
         entities.splice(ei, 1);
         break; // entity gone; stop checking it against other cores
       }
+    }
+  }
+  return deadCoreIds;
+}
+
+// Hostile bullets vs cores. Each overlapping bullet dies on impact and the
+// core takes the bullet's full damage. Same friend/foe model as everywhere
+// else — bullets of the core's own team pass through (no friendly fire).
+// Returns IDs of cores that died this tick so the caller can filter and
+// trigger game-over, matching the resolveCoreEntityCollisions pattern.
+export function resolveCoreBulletCollisions(
+  cores: Core[],
+  bullets: Bullet[],
+): number[] {
+  if (!cores.length || !bullets.length) return [];
+  const deadCoreIds: number[] = [];
+  for (const b of bullets) {
+    if (b.life <= 0) continue;
+    for (const c of cores) {
+      if (c.hp <= 0 || c.teamId === b.teamId) continue;
+      const half = c.size * 0.5;
+      const closestX = Math.max(c.pos.x - half, Math.min(b.pos.x, c.pos.x + half));
+      const closestY = Math.max(c.pos.y - half, Math.min(b.pos.y, c.pos.y + half));
+      const dx = b.pos.x - closestX;
+      const dy = b.pos.y - closestY;
+      if (dx * dx + dy * dy > b.radius * b.radius) continue;
+      c.hp = Math.max(0, c.hp - b.damage);
+      b.life = 0;
+      if (c.hp <= 0) deadCoreIds.push(c.id);
+      break; // one bullet only hits one core
     }
   }
   return deadCoreIds;
