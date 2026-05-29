@@ -97,6 +97,7 @@ import {
   resolvePlayerEnemyCollisions,
   updateEnemies,
   type Enemy,
+  type EnemyKind,
 } from "./game/enemies";
 import { Hud } from "./components/Hud";
 import { EndOverlay } from "./components/EndOverlay";
@@ -202,11 +203,12 @@ export default function TankShooter() {
   // max HP). Lets us exercise the damage / game-over flows without having
   // to lure polygons onto every test target.
   const pendingDevDamageRef = useRef<boolean>(false);
-  // Dev-only: 'p' tags this each press; the frame loop consumes the flag
-  // and spawns a single swarm enemy at the cursor's world position. Lives
-  // here until the real wave system lands so the AI / damage / rendering
-  // path can be exercised one enemy at a time.
-  const pendingSwarmSpawnRef = useRef<boolean>(false);
+  // Dev-only: per-kind hotkeys ('p' = swarm, 'o' = gunner) tag this with
+  // the kind to spawn next frame; the frame loop reads + clears it and
+  // drops one enemy at the cursor's world position. Lives here until the
+  // real wave system lands so each kind's AI / damage / rendering path can
+  // be exercised one enemy at a time.
+  const pendingEnemySpawnRef = useRef<EnemyKind | null>(null);
   const enemiesRef = useRef<Enemy[]>([]);
   const nextEnemyIdRef = useRef<number>(1);
   // Game-over (core destroyed) state. Ref drives the loop, state drives JSX.
@@ -536,7 +538,13 @@ export default function TankShooter() {
       if (k === 'p') {
         // Dev: spawn a single swarm enemy at the cursor next frame.
         if (!aliveRef.current || coreDestroyedRef.current) return;
-        pendingSwarmSpawnRef.current = true;
+        pendingEnemySpawnRef.current = 'swarm';
+        return;
+      }
+      if (k === 'o') {
+        // Dev: spawn a single gunner enemy at the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingEnemySpawnRef.current = 'gunner';
         return;
       }
       if (k === 'e') {
@@ -909,17 +917,20 @@ export default function TankShooter() {
           turretTargets,
         );
       }
-      // Dev: 'p' spawns a single swarm at the cursor's world position. The
-      // wave system will eventually take over enemy spawning; this hotkey
-      // lives here so the AI / damage / rendering path can be exercised one
-      // enemy at a time without the wave scaffolding.
-      if (pendingSwarmSpawnRef.current && aliveRef.current && !coreDestroyedRef.current) {
-        pendingSwarmSpawnRef.current = false;
+      // Dev spawn: 'p' = swarm, 'o' = gunner. The wave system will eventually
+      // take over enemy spawning; these hotkeys live here so each kind's AI /
+      // damage / rendering path can be exercised one enemy at a time without
+      // the wave scaffolding. Adding a new kind is a one-line key handler +
+      // adding the kind to EnemyKind / ENEMY_DEFS — this dispatch is
+      // kind-agnostic.
+      if (pendingEnemySpawnRef.current && aliveRef.current && !coreDestroyedRef.current) {
+        const kind = pendingEnemySpawnRef.current;
+        pendingEnemySpawnRef.current = null;
         const mwx = camera.x + mouseRef.current.x / zoom;
         const mwy = camera.y + mouseRef.current.y / zoom;
         enemiesRef.current = [
           ...enemiesRef.current,
-          createEnemy(nextEnemyIdRef.current++, 'swarm', { x: mwx, y: mwy }),
+          createEnemy(nextEnemyIdRef.current++, kind, { x: mwx, y: mwy }),
         ];
       }
       // Dev: 'k' damages whatever structure sits under the cursor by 10% of

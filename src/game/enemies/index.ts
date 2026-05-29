@@ -3,4 +3,5 @@
 // boundaries can be rearranged without touching callers.
 
 export * from './enemySystem';
+export * from './gunner';
 export * from './swarm';

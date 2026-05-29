@@ -22,11 +22,12 @@ import { TICK_DURATION } from '../stats';
 import type { Bullet } from '../tank';
 import { getTeamPalette, type TeamId } from '../teams';
 
+import { GUNNER_DEF } from './gunner';
 import { SWARM_DEF } from './swarm';
 
 // === Shared types ===
 
-export type EnemyKind = 'swarm';
+export type EnemyKind = 'swarm' | 'gunner';
 
 export interface Enemy {
   id: number;
@@ -72,18 +73,27 @@ export interface EnemyDef {
   // fires are pushed into `ctx.bullets`.
   update: (enemy: Enemy, ctx: EnemyUpdateContext) => void;
   // Body interior (the mark inside the shared chassis circle). Caller has
-  // already translated to the enemy center; draw in local coords.
+  // translated to the enemy center AND rotated by aimAngle, so +x points
+  // down the barrel — any asymmetric chassis detail (armor plates, grilles,
+  // intakes) should be drawn in this local frame and will track the aim.
   drawInterior: (
     ctx: CanvasRenderingContext2D,
     enemy: Enemy,
     accent: string,
     accentDim: string,
   ) => void;
+  // Optional override for the barrel shape. Drawn BEFORE the chassis so the
+  // breech tucks under the body; the canvas is already translated to the
+  // enemy center and rotated by aimAngle (so +x points down the barrel).
+  // When omitted, drawEnemy renders a simple rect at `barrelLength` ×
+  // `barrelWidth` — fine for plain tank silhouettes.
+  drawBarrel?: (ctx: CanvasRenderingContext2D, enemy: Enemy) => void;
 }
 
 // === Per-kind registry ===
 export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   swarm: SWARM_DEF,
+  gunner: GUNNER_DEF,
 };
 
 export function getEnemyDef(kind: EnemyKind): EnemyDef {
@@ -289,25 +299,33 @@ export function drawEnemy(
 
   const palette = getTeamPalette(enemy.teamId);
 
-  // Barrel — drawn under the chassis so its breech tucks beneath the body.
-  if (def.barrelLength > 0) {
-    ctx.save();
-    ctx.translate(sx, sy);
-    ctx.rotate(enemy.aimAngle);
-    ctx.fillStyle = '#999999';
-    ctx.strokeStyle = '#727272';
-    ctx.lineWidth = 3;
-    const bx = def.radius - 4;
-    ctx.beginPath();
-    ctx.rect(bx, -def.barrelWidth / 2, def.barrelLength, def.barrelWidth);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Chassis + per-kind interior.
+  // Rotate the whole tank by aimAngle — barrel, chassis, and per-kind
+  // interior all turn together. Tanks in this lineage rotate as a unit;
+  // turning only the barrel while the chassis sits flat makes asymmetric
+  // chassis features (grilles, armor plates) look detached from the body.
   ctx.save();
   ctx.translate(sx, sy);
+  ctx.rotate(enemy.aimAngle);
+
+  // Barrel — drawn first so the chassis covers its breech. Kinds can
+  // override the rect default via def.drawBarrel (e.g. gunner's
+  // trapezoidal silhouette).
+  if (def.barrelLength > 0) {
+    if (def.drawBarrel) {
+      def.drawBarrel(ctx, enemy);
+    } else {
+      ctx.fillStyle = '#999999';
+      ctx.strokeStyle = '#727272';
+      ctx.lineWidth = 3;
+      const bx = def.radius - 4;
+      ctx.beginPath();
+      ctx.rect(bx, -def.barrelWidth / 2, def.barrelLength, def.barrelWidth);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // Chassis.
   ctx.fillStyle = '#909295';
   ctx.strokeStyle = '#575757';
   ctx.lineWidth = 3;
@@ -315,7 +333,11 @@ export function drawEnemy(
   ctx.arc(0, 0, def.radius, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+
+  // Per-kind interior (drawn in the rotated frame so plates/grilles track
+  // aim along with the chassis).
   def.drawInterior(ctx, enemy, palette.accent, palette.accentDim);
+
   ctx.restore();
 
   // Damage flash overlay on the body.
