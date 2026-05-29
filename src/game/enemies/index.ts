@@ -4,4 +4,5 @@
 
 export * from './enemySystem';
 export * from './gunner';
+export * from './sniper';
 export * from './swarm';

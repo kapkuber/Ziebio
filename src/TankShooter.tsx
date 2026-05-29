@@ -547,6 +547,12 @@ export default function TankShooter() {
         pendingEnemySpawnRef.current = 'gunner';
         return;
       }
+      if (k === 'i') {
+        // Dev: spawn a single sniper enemy at the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingEnemySpawnRef.current = 'sniper';
+        return;
+      }
       if (k === 'e') {
         // Auto-fire toggle. Held-mouse fire still works in parallel; either
         // signal triggers the per-reload shot in the frame loop.

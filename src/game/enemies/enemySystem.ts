@@ -23,11 +23,12 @@ import type { Bullet } from '../tank';
 import { getTeamPalette, type TeamId } from '../teams';
 
 import { GUNNER_DEF } from './gunner';
+import { SNIPER_DEF } from './sniper';
 import { SWARM_DEF } from './swarm';
 
 // === Shared types ===
 
-export type EnemyKind = 'swarm' | 'gunner';
+export type EnemyKind = 'swarm' | 'gunner' | 'sniper';
 
 export interface Enemy {
   id: number;
@@ -94,6 +95,7 @@ export interface EnemyDef {
 export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   swarm: SWARM_DEF,
   gunner: GUNNER_DEF,
+  sniper: SNIPER_DEF,
 };
 
 export function getEnemyDef(kind: EnemyKind): EnemyDef {
