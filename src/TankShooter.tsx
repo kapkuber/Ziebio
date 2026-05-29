@@ -146,6 +146,11 @@ export default function TankShooter() {
   const keysRef = useRef<Set<string>>(new Set());
   const mouseRef = useRef<Vec2>({ x: 0, y: 0 });
   const mouseDownRef = useRef<boolean>(false);
+  // Auto-fire toggle (default off). 'e' flips it; the frame loop fires every
+  // reload tick while this is on, same gate the held-mouse path uses. Mirror
+  // state drives the hint so the player can see whether it's armed.
+  const autoFireRef = useRef<boolean>(false);
+  const [autoFire, setAutoFire] = useState(false);
   const cooldownRemainingRef = useRef<number>(0);
   const gridPatternsRef = useRef<GridPatterns>({ inside: null, outside: null });
   const spawnsThisFrameRef = useRef<number>(0);
@@ -534,6 +539,13 @@ export default function TankShooter() {
         pendingSwarmSpawnRef.current = true;
         return;
       }
+      if (k === 'e') {
+        // Auto-fire toggle. Held-mouse fire still works in parallel; either
+        // signal triggers the per-reload shot in the frame loop.
+        autoFireRef.current = !autoFireRef.current;
+        setAutoFire(autoFireRef.current);
+        return;
+      }
       if (k === 'm') {
         const current = playerProgressRef.current;
         if (current.level < MAX_LEVEL) {
@@ -632,8 +644,17 @@ export default function TankShooter() {
       cooldownRemainingRef.current = Math.max(0, cooldownRemainingRef.current - dt);
       // Tick down tank damage flash timer before collision step (so new hits start fresh)
       tankHitTRef.current = Math.max(0, tankHitTRef.current - dt);
-      // Continuous fire handling with cooldown (max 1 per 0.6s)
-      if (alive && mouseDownRef.current && cooldownRemainingRef.current <= 0) {
+      // Continuous fire handling with cooldown. Either holding LMB or having
+      // auto-fire toggled on triggers a shot every reload tick. Auto-fire is
+      // suppressed while a placement mode is open so the tank doesn't keep
+      // shooting at the cursor while the player is dropping walls/turrets.
+      const autoFireArmed =
+        autoFireRef.current && placement.active() === null;
+      if (
+        alive &&
+        (mouseDownRef.current || autoFireArmed) &&
+        cooldownRemainingRef.current <= 0
+      ) {
         spawnBullet();
         cooldownRemainingRef.current = derived.reloadSeconds;
       }
@@ -1019,6 +1040,7 @@ export default function TankShooter() {
         camera,
         spawnsThisFrame: spawnsThisFrameRef.current,
         maxSpawnsPerFrame: MAX_SPAWNS_PER_FRAME,
+        playerTeamId: LOCAL_PLAYER_TEAM,
         spawnSquare: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'square'),
         spawnTriangle: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'triangle'),
         spawnPentagon: (list) => entsSpawnRandom(list as any, nextEntityIdRef as any, tankPosRef.current, MAP_WIDTH, MAP_HEIGHT, SPAWN_SAFE_RADIUS, 'pentagon'),
@@ -1252,8 +1274,8 @@ export default function TankShooter() {
         : activeMode === 'turret'
           ? `Left click to place turret (${TURRET_FLUX_COST} flux) — press [T] to exit`
           : hasPlacedCore
-            ? "Left click to shoot · WASD to move · [V] walls · [X] flux generators · [T] turrets"
-            : "Left click to shoot · WASD to move · [C] to place core";
+            ? `Left click to shoot · WASD to move · [E] auto-fire: ${autoFire ? 'ON' : 'OFF'} · [V] walls · [X] flux generators · [T] turrets`
+            : `Left click to shoot · WASD to move · [E] auto-fire: ${autoFire ? 'ON' : 'OFF'} · [C] to place core`;
 
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>

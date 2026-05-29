@@ -15,7 +15,7 @@ import { circleIntersectsTriangle, circleIntersectsPolygon } from "./geometry";
 import { BULLET_RADIUS } from "./tank";
 import type { CameraInfo } from "./config";
 import { SHAPE_BASE_DAMAGE, TICK_DURATION } from "./stats";
-import { getTeamPalette } from "./teams";
+import { getTeamPalette, type TeamId } from "./teams";
 
 const BULLET_OUTLINE_WIDTH = 2.7;
 // Per-tick velocity impulse applied to a bullet while it overlaps an entity,
@@ -33,6 +33,14 @@ export interface BulletUpdateParams {
   camera: CameraInfo;
   spawnsThisFrame: number;
   maxSpawnsPerFrame: number;
+  // The team allowed to interact with polygons. Per CLAUDE.md polygons are
+  // neutral world resources, but in this game they're the local player's
+  // farm — wave enemy bullets phase through them entirely. Bullets whose
+  // teamId differs from this value skip the polygon collision pass below,
+  // which also keeps kill credit clean: onEntityKilled only ever fires for
+  // bullets owned by this team. In a future multi-player-team setup this
+  // becomes a Set<TeamId> of player-aligned teams.
+  playerTeamId: TeamId;
   spawnSquare: (entities: GameEntity[]) => boolean;
   spawnTriangle: (entities: GameEntity[]) => boolean;
   spawnPentagon: (entities: GameEntity[]) => boolean;
@@ -53,6 +61,7 @@ export function updateBullets({
   camera,
   spawnsThisFrame,
   maxSpawnsPerFrame,
+  playerTeamId,
   spawnSquare,
   spawnTriangle,
   spawnPentagon,
@@ -102,6 +111,12 @@ export function updateBullets({
 
     bulletLoop: for (const bullet of bullets) {
       if (bullet.life <= 0) continue;
+      // Wave-enemy bullets phase through polygons entirely — polygons are the
+      // local player's farm, not a shared world resource. Skipping the
+      // collision pass also keeps kill credit clean: onEntityKilled below
+      // only fires for player-team bullets, so the player never gets XP or
+      // score for a polygon that a swarm bullet happened to destroy.
+      if (bullet.teamId !== playerTeamId) continue;
       const cx = Math.floor(bullet.pos.x / cellSize);
       const cy = Math.floor(bullet.pos.y / cellSize);
       for (let dx = -1; dx <= 1; dx++) {
