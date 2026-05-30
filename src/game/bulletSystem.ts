@@ -166,7 +166,10 @@ export function updateBullets({
                 if (entity.kind === "triangle") removedTriangles += 1;
                 else if (entity.kind === "pentagon") removedPentagons += 1;
                 else removedSquares += 1;
-                if (onEntityKilled) onEntityKilled(entity);
+                // Building-fired bullets (turret, etc.) opt out of kill credit
+                // via attributable=false — the structure made the kill, not
+                // the player who placed it.
+                if (onEntityKilled && bullet.attributable !== false) onEntityKilled(entity);
               }
             };
             if (entity.kind === "triangle") {

@@ -553,6 +553,12 @@ export default function TankShooter() {
         pendingEnemySpawnRef.current = 'sniper';
         return;
       }
+      if (k === 'u') {
+        // Dev: spawn a single rusher enemy at the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingEnemySpawnRef.current = 'rusher';
+        return;
+      }
       if (k === 'e') {
         // Auto-fire toggle. Held-mouse fire still works in parallel; either
         // signal triggers the per-reload shot in the frame loop.
@@ -817,8 +823,10 @@ export default function TankShooter() {
         }
       }
       // Polygon-building contact: same continuous-contact model as cores.
-      // Buildings that die this tick are filtered out below; score-only
-      // (no XP) to match the "kills you didn't actually make" rule.
+      // Buildings that die this tick are filtered out below. Building kills
+      // grant no XP and no score — the structure made the kill, not the
+      // player who placed it. (Cores still grant score; they're the player's
+      // HQ, not a deployed defense.)
       if (buildingsRef.current.length > 0) {
         const deadBuildingIds = resolveBuildingEntityCollisions(
           buildingsRef.current,
@@ -826,7 +834,6 @@ export default function TankShooter() {
           dt,
           (e) => {
             entsQueueDeathFx(e);
-            pendingScoreRef.current += scoreForKill(e.kind, e.maxHp);
           },
         );
         if (deadBuildingIds.length > 0) {
@@ -854,7 +861,20 @@ export default function TankShooter() {
           bulletIdRef,
           playerPos: aliveRef.current ? tankPosRef.current : null,
           playerTeamId: LOCAL_PLAYER_TEAM,
+          playerRadius: tankRadius,
           dt,
+          // Kamikaze kinds (rusher) call this directly so their burst damage
+          // bypasses the death-factor scaling in resolvePlayerEnemyCollisions.
+          // We mark this damage in the same shape the regular hits do —
+          // hit flash, tookDamage flag (suppresses regen), and the kill-
+          // attribution label for the death screen.
+          damagePlayer: (dmg, source) => {
+            if (!aliveRef.current) return;
+            tankHpRef.current = Math.max(0, tankHpRef.current - dmg);
+            tankHitTRef.current = HIT_FLASH_DURATION;
+            tookDamage = true;
+            lastDamageSourceRef.current = source;
+          },
         });
         // Game-over check — an enemy can finish off a core just like a
         // polygon. Mirrors the polygon-vs-core game-over trigger.
@@ -877,6 +897,12 @@ export default function TankShooter() {
             setCoreDestroyed(true);
             placement.exitAll();
           }
+        }
+        // Filter any buildings the rushers crashed into. Without this, dead
+        // buildings sit in the list until the polygon/bullet building passes
+        // later in the frame and get queried / drawn meanwhile.
+        if (buildingsRef.current.some((b) => b.hp <= 0)) {
+          buildingsRef.current = buildingsRef.current.filter((b) => b.hp > 0);
         }
       }
       // Player-vs-enemy contact: reciprocal continuous body damage + push.

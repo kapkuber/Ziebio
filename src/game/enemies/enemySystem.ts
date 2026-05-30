@@ -23,12 +23,13 @@ import type { Bullet } from '../tank';
 import { getTeamPalette, type TeamId } from '../teams';
 
 import { GUNNER_DEF } from './gunner';
+import { RUSHER_DEF } from './rusher';
 import { SNIPER_DEF } from './sniper';
 import { SWARM_DEF } from './swarm';
 
 // === Shared types ===
 
-export type EnemyKind = 'swarm' | 'gunner' | 'sniper';
+export type EnemyKind = 'swarm' | 'gunner' | 'sniper' | 'rusher';
 
 export interface Enemy {
   id: number;
@@ -55,8 +56,19 @@ export interface EnemyUpdateContext {
   bulletIdRef: { current: number };
   playerPos: Vec2 | null;       // null if player is dead / not yet present
   playerTeamId: TeamId;
+  // Current scaled tank radius (sizeMultiplier already applied). Lets kinds
+  // that do their OWN player-contact resolution (kamikazes — see rusher)
+  // use the same hit distance the shared resolvePlayerEnemyCollisions uses.
+  playerRadius?: number;
   dt: number;
   onCoreDamaged?: (core: Core, dmg: number) => void;
+  // Direct player-damage hook for kinds that bypass the shared
+  // resolvePlayerEnemyCollisions pipeline (which clamps an enemy's outgoing
+  // damage to its current HP via the death-factor scaler). Kamikaze kinds
+  // need to deliver burst damage even with 1 HP left, so they call this
+  // directly and set their own hp = 0. The string is used for kill
+  // attribution on the death screen.
+  damagePlayer?: (damage: number, source: string) => void;
 }
 
 // Per-kind contract used by the manager. Kind-internal constants live on the
@@ -96,6 +108,7 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   swarm: SWARM_DEF,
   gunner: GUNNER_DEF,
   sniper: SNIPER_DEF,
+  rusher: RUSHER_DEF,
 };
 
 export function getEnemyDef(kind: EnemyKind): EnemyDef {

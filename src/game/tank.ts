@@ -13,6 +13,11 @@ export interface Bullet {
   maxHp: number;
   damage: number;
   teamId: TeamId; // drives bullet color and same-team pass-through
+  // Whether kills by this bullet count toward a player's XP/score. Player
+  // bullets leave this undefined (treated as attributable). Building-fired
+  // bullets (turret, future auto-defenses) set this to false — the structure
+  // made the kill, not the player who placed it.
+  attributable?: boolean;
 }
 
 export const TANK_RADIUS = 24;

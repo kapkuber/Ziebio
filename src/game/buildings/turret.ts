@@ -157,6 +157,7 @@ export function updateTurrets(
         maxHp: TURRET_BULLET_HP,
         damage: TURRET_BULLET_DAMAGE,
         teamId: b.teamId,
+        attributable: false,
       });
       b.reloadRemaining = TURRET_RELOAD_SECONDS;
     }
