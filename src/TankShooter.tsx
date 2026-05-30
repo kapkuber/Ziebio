@@ -93,6 +93,7 @@ import {
   createEnemy,
   drawEnemy,
   resolveBulletPlayerCollisions,
+  splitOnDeath,
   resolveEnemyBulletCollisions,
   resolvePlayerEnemyCollisions,
   updateEnemies,
@@ -557,6 +558,12 @@ export default function TankShooter() {
         // Dev: spawn a single rusher enemy at the cursor next frame.
         if (!aliveRef.current || coreDestroyedRef.current) return;
         pendingEnemySpawnRef.current = 'rusher';
+        return;
+      }
+      if (k === 'y') {
+        // Dev: spawn a single splitter enemy at the cursor next frame.
+        if (!aliveRef.current || coreDestroyedRef.current) return;
+        pendingEnemySpawnRef.current = 'splitter';
         return;
       }
       if (k === 'e') {
@@ -1149,7 +1156,21 @@ export default function TankShooter() {
         resolveEnemyBulletCollisions(enemiesRef.current, bulletsRef.current, dt);
       }
       if (enemiesRef.current.some((e) => e.hp <= 0)) {
-        enemiesRef.current = enemiesRef.current.filter((e) => e.hp > 0);
+        // Splitters fracture into 4 swarm children on death. Spawn the
+        // children using the parent's pre-filter position, then drop the
+        // dead splitter in the same filter pass that removes other dead
+        // enemies. Children inherit the parent's team + owner. The loop
+        // snapshots the length before any pushes so newly-spawned children
+        // (hp > 0, kind != splitter) aren't revisited.
+        const list = enemiesRef.current;
+        const preSplitLen = list.length;
+        for (let i = 0; i < preSplitLen; i++) {
+          const e = list[i];
+          if (e.hp <= 0 && e.kind === 'splitter') {
+            splitOnDeath(e, list, nextEnemyIdRef);
+          }
+        }
+        enemiesRef.current = list.filter((e) => e.hp > 0);
       }
 
       // Hostile bullets damaging the player. Any bullet whose teamId differs

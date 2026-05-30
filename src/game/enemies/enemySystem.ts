@@ -25,11 +25,12 @@ import { getTeamPalette, type TeamId } from '../teams';
 import { GUNNER_DEF } from './gunner';
 import { RUSHER_DEF } from './rusher';
 import { SNIPER_DEF } from './sniper';
+import { SPLITTER_DEF } from './splitter';
 import { SWARM_DEF } from './swarm';
 
 // === Shared types ===
 
-export type EnemyKind = 'swarm' | 'gunner' | 'sniper' | 'rusher';
+export type EnemyKind = 'swarm' | 'gunner' | 'sniper' | 'rusher' | 'splitter';
 
 export interface Enemy {
   id: number;
@@ -109,6 +110,7 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   gunner: GUNNER_DEF,
   sniper: SNIPER_DEF,
   rusher: RUSHER_DEF,
+  splitter: SPLITTER_DEF,
 };
 
 export function getEnemyDef(kind: EnemyKind): EnemyDef {
