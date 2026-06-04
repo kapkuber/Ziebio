@@ -10,7 +10,7 @@ Currently there are five enemy archetypes (swarm, gunner, sniper, rusher, splitt
 
 ## Core loop
 
-1. **Place a core** with `C` — it's the only structure you actually defend. Losing it ends the run.
+1. **Place a core** with `C`: it's the only structure you actually defend. Losing it ends the run.
 2. **Farm polygons** (square / triangle / pentagon: neutral world resources, not team bound) for XP to level your tank and unlock skill points.
 3. **Earn flux** from generators around your core.
 4. **Build defenses** walls, turrets, more generators: gated by the core's tier.
@@ -36,7 +36,7 @@ Dev-only:
 |---|---|
 | `P` / `O` / `I` / `U` / `Y` | Spawn swarm / gunner / sniper / rusher / splitter at the cursor |
 | `K` | Deal 10% max-HP damage to the structure under the cursor |
-| ⏸ button (top-right) | Pause everything except the camera — `WASD` pans the camera around the frozen world |
+| Pause button (top right) | Pause everything except the camera: `WASD` pans the camera around the frozen world |
 
 ## Running locally
 
