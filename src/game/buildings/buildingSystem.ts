@@ -307,7 +307,7 @@ export function findBuildingAtPoint(
 // Number of grid cells of buildable space extending OUT from each side of
 // the core. With CORE_GRID_CELLS = 4 and BUILDABLE_CELLS_FROM_CORE cells per
 // side, the total buildable square is 4 + 2*N cells, centered on the core.
-export const BUILDABLE_CELLS_FROM_CORE = 35;
+export const BUILDABLE_CELLS_FROM_CORE = 25;
 
 export interface BuildableZone {
   minX: number;

@@ -31,9 +31,15 @@ export interface HudProps {
   level: number;
   xp: number;
   stats: StatPoints;
+  // Wave indicator. When `wave` is null the pill is hidden (pre-core
+  // placement, before the campaign starts). `prepSeconds` is the prep
+  // timer countdown (null while a wave is active or before any wave
+  // has begun). The label string ("Wave N/50" or "Wave N · Endless")
+  // is derived in the parent so the HUD stays pure-display.
+  wave: { label: string; prepSeconds: number | null } | null;
 }
 
-export function Hud({ hint, score, flux, level, xp, stats }: HudProps) {
+export function Hud({ hint, score, flux, level, xp, stats, wave }: HudProps) {
   const skillPointsAvailable = availableSkillPoints(level, stats);
   const xpPct = Math.min(100, (xp / Math.max(1, xpForNextLevel(level))) * 100);
 
@@ -42,6 +48,19 @@ export function Hud({ hint, score, flux, level, xp, stats }: HudProps) {
       <div className="fixed top-3 left-3 text-xs bg-white/80 rounded-md px-2 py-1 shadow">
         {hint}
       </div>
+
+      {wave && (
+        <div className="hud-wave-banner" data-hud="wave">
+          <div className="hud-pill hud-pill-wave">
+            <div className="hud-pill-fill wave" />
+            <span className="hud-dot wave" />
+            <span className="hud-text">
+              {wave.label}
+              {wave.prepSeconds !== null && ` · Prep ${wave.prepSeconds}s (Space)`}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div id="hud-score-level" data-hud="score-level" className="hud-score-level">
         <div className="hud-pill hud-pill-score">

@@ -97,6 +97,16 @@ import {
 } from "./game/buildings";
 import { ActionPopup } from "./components/BuildingActionPopup";
 import { MAX_ENTITY_LEVEL } from "./game/balance";
+import {
+  beginCampaign,
+  chooseContinue,
+  createWaveState,
+  prepRemainingSeconds,
+  skipPrep,
+  updateWaveSystem,
+  waveProgressLabel,
+} from "./game/waves";
+import { xpForEnemyKill } from "./game/balance";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
 import {
   createEnemy,
@@ -239,6 +249,40 @@ export default function TankShooter() {
   // React-commit lag (matches zombs.io's "panel stuck to the structure"
   // behavior). React only owns the popup's content; never its position.
   const popupElRef = useRef<HTMLDivElement | null>(null);
+  // === Wave campaign state ===
+  // Manager + mirror. The ref drives game logic (per-frame updateWaveSystem
+  // call); the mirror state drives HUD/overlay re-renders. setWaveTick is
+  // bumped each frame the wave system is running so the HUD's wave pill
+  // (prep timer countdown) refreshes without React polling.
+  const waveStateRef = useRef(createWaveState());
+  const [waveTick, setWaveTick] = useState<number>(0);
+  // Victory overlay — flips true the frame wave 50 is cleared, until
+  // the player picks Continue or Restart.
+  const [showVictory, setShowVictory] = useState<boolean>(false);
+  // === Dev pause ===
+  // When true, the frame loop forces dt = 0: physics integrations,
+  // spawn timers, wave timers, cooldowns, animations all stall while
+  // the canvas keeps drawing the current frozen frame. Useful for
+  // inspecting layouts mid-fight without losing state. Ref drives the
+  // frame loop; mirror state drives the button label.
+  const pausedRef = useRef<boolean>(false);
+  const [paused, setPaused] = useState<boolean>(false);
+  // World-space displacement from the tank's position. Tank-locked camera
+  // is `tankPos + (0,0)`; when paused, WASD increments this so the dev
+  // can pan around the frozen world without losing the tank's anchor.
+  // Snapped back to (0,0) on unpause so the camera glides home in one
+  // step (no need for an extra lerp).
+  const cameraOffsetRef = useRef({ x: 0, y: 0 });
+  const togglePaused = () => {
+    const next = !pausedRef.current;
+    pausedRef.current = next;
+    setPaused(next);
+    if (!next) {
+      // Reset pan offset on unpause so the tank re-centers immediately.
+      cameraOffsetRef.current.x = 0;
+      cameraOffsetRef.current.y = 0;
+    }
+  };
   // Dev-only: 'k' tags this each press; the frame loop consumes the flag
   // and damages whatever building/core sits under the cursor (10% of its
   // max HP). Lets us exercise the damage / game-over flows without having
@@ -336,6 +380,9 @@ export default function TankShooter() {
           ];
           hasPlacedCoreRef.current = true;
           setHasPlacedCore(true);
+          // Kick off the campaign — wave 1's prep timer starts now that
+          // the player has somewhere to defend.
+          beginCampaign(waveStateRef.current);
           return true;
         },
         onExit: () => { previewCoreRef.current = null; },
@@ -466,6 +513,10 @@ export default function TankShooter() {
   }, []);
   function spawnBullet() {
     if (!aliveRef.current) return;
+    // No firing during dev pause — bullets wouldn't move (dt = 0) and
+    // would pile up at the muzzle. This catches both the autofire path
+    // above and the one-shot mousedown path below.
+    if (pausedRef.current) return;
     const tank = tankPosRef.current;
     const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
     const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
@@ -541,8 +592,11 @@ export default function TankShooter() {
         const rect = canvas.getBoundingClientRect();
         const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
         const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
-        const camX = tankPosRef.current.x - rect.width / zoom / 2;
-        const camY = tankPosRef.current.y - rect.height / zoom / 2;
+        // Mirror getCamera: tankPos + cameraOffset is the focal point.
+        // Including the offset here keeps click-to-popup accurate while
+        // the dev pan is active during pause.
+        const camX = tankPosRef.current.x + cameraOffsetRef.current.x - rect.width / zoom / 2;
+        const camY = tankPosRef.current.y + cameraOffsetRef.current.y - rect.height / zoom / 2;
         const wx = camX + mouseRef.current.x / zoom;
         const wy = camY + mouseRef.current.y / zoom;
         // Building first — buildings sit visually on top of cores. Then
@@ -619,6 +673,16 @@ export default function TankShooter() {
       // mode handler.
       if (e.key === 'Escape' && popupTargetRef.current) {
         setPopupTarget(null);
+        return;
+      }
+      // Space — skip wave prep timer. Lets the player (or dev tester)
+      // start the next wave immediately instead of waiting 60 s. No-op
+      // outside prep. e.preventDefault() suppresses the browser's
+      // default Space → page-scroll behavior in case the canvas isn't
+      // claiming all wheel/scroll real estate.
+      if (e.key === ' ') {
+        e.preventDefault();
+        skipPrep(waveStateRef.current);
         return;
       }
       const k = e.key.toLowerCase();
@@ -706,9 +770,11 @@ export default function TankShooter() {
       const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
       const width = canvas.width / (dpr * zoom);
       const height = canvas.height / (dpr * zoom);
+      // tankPos + cameraOffset is the focal point. Offset is zero during
+      // normal play; non-zero only when the dev pan is active during pause.
       return {
-        x: tankPosRef.current.x - width / 2,
-        y: tankPosRef.current.y - height / 2,
+        x: tankPosRef.current.x + cameraOffsetRef.current.x - width / 2,
+        y: tankPosRef.current.y + cameraOffsetRef.current.y - height / 2,
         width,
         height,
         devicePixelRatio: dpr,
@@ -718,19 +784,39 @@ export default function TankShooter() {
     function frame(ts: number) {
       const last = lastTsRef.current;
       lastTsRef.current = ts;
-      const dt = last ? Math.min((ts - last) / 1000, 0.05) : 0; // clamp to avoid huge jumps
+      // `realDt` always advances — used for clock-style updates that
+      // must keep ticking during pause (camera pan). `dt` is the
+      // game-state delta and zeros out under pause, freezing every
+      // integration (tank, bullets, polygons, enemies, wave timer,
+      // cooldowns, hit-flashes) in place.
+      const realDt = last ? Math.min((ts - last) / 1000, 0.05) : 0;
+      const dt = pausedRef.current ? 0 : realDt;
       spawnsThisFrameRef.current = 0;
 
       const alive = aliveRef.current;
-      // movement from WASD (world space) with drift/inertia — gated on alive
+      // movement from WASD (world space) with drift/inertia — gated on alive.
+      // During pause the same axes drive the camera-offset pan instead
+      // (handled just below); we still compute ix/iy here so both paths
+      // share the same input read.
       let ix = 0;
       let iy = 0;
-      if (alive) {
+      if (alive || pausedRef.current) {
         const keys = keysRef.current;
         if (keys.has('w')) iy -= 1;
         if (keys.has('s')) iy += 1;
         if (keys.has('a')) ix -= 1;
         if (keys.has('d')) ix += 1;
+      }
+      // Dev pause pan — WASD slides the camera around the frozen world.
+      // Uses realDt (not dt) so the pan responds to wall-clock input
+      // even while every gameplay integration is gated to dt = 0. Tank
+      // input below sees ix/iy as well, but with dt = 0 nothing happens
+      // to the tank — so the camera moves alone, exactly what we want.
+      if (pausedRef.current && (ix !== 0 || iy !== 0)) {
+        const PAN_SPEED = 900; // world px / sec — feels brisk for inspection
+        const len = Math.hypot(ix, iy) || 1;
+        cameraOffsetRef.current.x += (ix / len) * PAN_SPEED * realDt;
+        cameraOffsetRef.current.y += (iy / len) * PAN_SPEED * realDt;
       }
       const margin = 4 * GRID_SIZE;
       const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
@@ -746,7 +832,7 @@ export default function TankShooter() {
         (targetDeathZoom - deathZoomRef.current) * zoomAlpha;
       const zoom = (1 / Math.max(0.6, derived.fovMultiplier)) * deathZoomRef.current;
       ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
-      if (alive) {
+      if (alive && !pausedRef.current) {
         integrateTank(
           dt,
           ix,
@@ -758,7 +844,7 @@ export default function TankShooter() {
           margin,
           derived.moveSpeed,
         );
-      } else {
+      } else if (!alive) {
         // While dead, drag velocity to a halt so camera doesn't keep drifting.
         tankVelRef.current.x *= 0.85;
         tankVelRef.current.y *= 0.85;
@@ -776,6 +862,7 @@ export default function TankShooter() {
         autoFireRef.current && placement.active() === null;
       if (
         alive &&
+        !pausedRef.current &&
         (mouseDownRef.current || autoFireArmed) &&
         cooldownRemainingRef.current <= 0
       ) {
@@ -1083,12 +1170,32 @@ export default function TankShooter() {
           turretTargets,
         );
       }
-      // Dev spawn: 'p' = swarm, 'o' = gunner. The wave system will eventually
-      // take over enemy spawning; these hotkeys live here so each kind's AI /
-      // damage / rendering path can be exercised one enemy at a time without
-      // the wave scaffolding. Adding a new kind is a one-line key handler +
-      // adding the kind to EnemyKind / ENEMY_DEFS — this dispatch is
-      // kind-agnostic.
+      // Wave manager tick — drains prep timer, drips spawns, advances
+      // waves on clear. Runs alongside the per-kind enemy update so a
+      // newly-spawned wave enemy fights this frame instead of next.
+      updateWaveSystem(waveStateRef.current, {
+        dt,
+        enemies: enemiesRef.current,
+        nextEnemyIdRef,
+        tankPos: tankPosRef.current,
+        mapWidth: MAP_WIDTH,
+        mapHeight: MAP_HEIGHT,
+        active: aliveRef.current && !coreDestroyedRef.current,
+      });
+      // Push the victory dialog the frame wave 50 is cleared.
+      if (waveStateRef.current.victoryPending && !showVictory) {
+        setShowVictory(true);
+      }
+      // Bump waveTick so the HUD's wave pill (prep timer countdown +
+      // wave-number label) re-renders. Same no-op-when-unchanged trick
+      // as setFlux below.
+      setWaveTick((t) => (t + 1) % 1_000_000);
+      // Dev spawn: 'p' = swarm, 'o' = gunner. Dev-only path — leaves
+      // the wave system above as the real spawn driver. Single enemies
+      // dropped here count as part of whatever wave is currently
+      // active, so the wave manager waits for them to die before
+      // advancing (acceptable trade-off — don't dev-spawn mid-wave if
+      // you're testing wave completion).
       if (pendingEnemySpawnRef.current && aliveRef.current && !coreDestroyedRef.current) {
         const kind = pendingEnemySpawnRef.current;
         pendingEnemySpawnRef.current = null;
@@ -1283,17 +1390,22 @@ export default function TankShooter() {
         resolveEnemyBulletCollisions(enemiesRef.current, bulletsRef.current, dt);
       }
       if (enemiesRef.current.some((e) => e.hp <= 0)) {
-        // Splitters fracture into 4 swarm children on death. Spawn the
-        // children using the parent's pre-filter position, then drop the
-        // dead splitter in the same filter pass that removes other dead
-        // enemies. Children inherit the parent's team + owner. The loop
-        // snapshots the length before any pushes so newly-spawned children
-        // (hp > 0, kind != splitter) aren't revisited.
+        // Single attribution pass for every enemy death this frame —
+        // bullet-killed, body-rammed, rusher kamikaze, splitter
+        // killed-then-split. Awarding XP here (rather than at each
+        // damage source) guarantees no double-credit and no missed
+        // kills. Splitters also drop their 4 swarm children in this
+        // pass, using their pre-filter position. Children spawn with
+        // hp > 0 so they're not revisited; preSplitLen freezes the
+        // iteration bound before any push.
         const list = enemiesRef.current;
         const preSplitLen = list.length;
         for (let i = 0; i < preSplitLen; i++) {
           const e = list[i];
-          if (e.hp <= 0 && e.kind === 'splitter') {
+          if (e.hp > 0) continue;
+          pendingXpRef.current += xpForEnemyKill(e.kind, e.level);
+          pendingScoreRef.current += xpForEnemyKill(e.kind, e.level);
+          if (e.kind === 'splitter') {
             splitOnDeath(e, list, nextEnemyIdRef);
           }
         }
@@ -1517,8 +1629,10 @@ export default function TankShooter() {
     const rect = canvas.getBoundingClientRect();
     const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
     const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
-    const camX = tankPosRef.current.x - rect.width / zoom / 2;
-    const camY = tankPosRef.current.y - rect.height / zoom / 2;
+    // Include cameraOffset so the popup's initial mount-frame position
+    // is correct when the dev pan is active during pause.
+    const camX = tankPosRef.current.x + cameraOffsetRef.current.x - rect.width / zoom / 2;
+    const camY = tankPosRef.current.y + cameraOffsetRef.current.y - rect.height / zoom / 2;
     const half = size / 2;
     const sx = rect.left + (pos.x + half - camX) * zoom + 8;
     const sy = rect.top + (pos.y - half - camY) * zoom;
@@ -1543,6 +1657,19 @@ export default function TankShooter() {
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
       <canvas ref={canvasRef} style={{ display: "block" }} />
+      {/* Dev-only pause toggle. Pure DOM button so it survives a
+          paused frame loop (no React work involved with the pause
+          state — the button just flips pausedRef on click). Top-right
+          corner to stay out of the way of the wave banner / placement
+          previews / popups. */}
+      <button
+        className={`dev-pause-btn${paused ? ' is-paused' : ''}`}
+        onClick={togglePaused}
+        aria-pressed={paused}
+      >
+        {paused ? '▶ Resume' : '⏸ Pause'}
+        <span className="dev-pause-btn-label">DEV</span>
+      </button>
       <Hud
         hint={hint}
         score={score}
@@ -1550,6 +1677,12 @@ export default function TankShooter() {
         level={playerProgress.level}
         xp={playerProgress.xp}
         stats={playerStats}
+        wave={waveStateRef.current.started ? {
+          // waveTick is read so this expression re-evaluates each frame
+          // — otherwise the prep timer would freeze at its mount value.
+          label: (() => { void waveTick; return waveProgressLabel(waveStateRef.current); })(),
+          prepSeconds: prepRemainingSeconds(waveStateRef.current),
+        } : null}
       />
       {isDead && deathInfo && !coreDestroyed && (
         <EndOverlay
@@ -1572,6 +1705,49 @@ export default function TankShooter() {
           buttonLabel="Restart"
           onButtonClick={() => window.location.reload()}
         />
+      )}
+      {/* Wave-50 victory overlay. Reuses the death-overlay classes for
+          visual consistency, then puts two buttons (Continue / Restart)
+          side by side instead of one. Continue advances into endless
+          mode (count scales up, levels capped at L5). Restart reloads. */}
+      {showVictory && (
+        <div className="death-overlay">
+          <div className="death-panel">
+            <div className="death-killed-by">Victory</div>
+            <div className="death-killer-name">Campaign Complete</div>
+            <div className="death-stats">
+              <div className="death-stat-row">
+                <span className="death-stat-label">Score:</span>
+                <span className="death-stat-value">{score}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Level:</span>
+                <span className="death-stat-value">{playerProgress.level}</span>
+              </div>
+              <div className="death-stat-row">
+                <span className="death-stat-label">Wave:</span>
+                <span className="death-stat-value">{waveStateRef.current.waveNumber}</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <button
+              className="death-respawn-btn"
+              onClick={() => {
+                chooseContinue(waveStateRef.current);
+                setShowVictory(false);
+              }}
+            >
+              Continue (Endless)
+            </button>
+            <button
+              className="death-respawn-btn"
+              onClick={() => window.location.reload()}
+            >
+              Restart
+            </button>
+          </div>
+        </div>
       )}
       {/* Action popup — left-click a friendly building or core to open.
           React only owns content (HP / affordability / buttons); the

@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code working files (per-machine, not part of the project)
+.claude/
+CLAUDE.md

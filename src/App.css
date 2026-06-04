@@ -102,6 +102,121 @@
   background: #5cd4f2;
 }
 
+/* === Wave banner ===
+   Lives at top-center, away from the bottom-center score/level/flux
+   stack — keeps the central column uncluttered. Reuses the .hud-pill
+   geometry from the bottom stack so the visual family stays unified;
+   only the container positioning differs. */
+#root .hud-wave-banner {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  pointer-events: none;
+  color: #ffffff;
+  font-size: 14px;
+  min-width: 240px;
+}
+
+#root .hud-wave-banner .hud-pill {
+  background: rgba(47, 47, 47, 0.92);
+  border-radius: 9999px;
+  padding: 4px 14px;
+  text-align: center;
+  border: 2px solid rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+  overflow: hidden;
+}
+
+#root .hud-wave-banner .hud-pill-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  border-radius: 9999px;
+  opacity: 0.55;
+}
+
+#root .hud-wave-banner .hud-pill-fill.wave {
+  /* Reuses the HUD's reload-stat orange (#E7896D) — distinct from the
+     green / yellow / cyan triad already used by the score / level /
+     flux pills, so wave progress reads at a glance. */
+  background: #E7896D;
+}
+
+#root .hud-wave-banner .hud-text {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  color: #ffffff;
+  font-weight: 700;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3px #000000;
+}
+
+/* === Dev pause button ===
+   Top-right corner. Matches the action-popup chassis aesthetic (gray
+   plate + #575757 outline + 2px corners) so it reads as part of the
+   same UI family but with a small "DEV" tag marking it as a debug
+   affordance. Pressed state inverts to a yellow accent stripe to make
+   the paused state obvious at a glance. */
+#root .dev-pause-btn {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 10001;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(144, 146, 149, 0.88);
+  border: 2px solid #575757;
+  border-radius: 2px;
+  color: #ffffff;
+  font-family: "Ubuntu", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: inset 0 3px 0 0 #5cd4f2; /* HUD flux cyan top stripe */
+  paint-order: stroke fill;
+  -webkit-text-stroke: 1.5px #000000;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 80ms ease-out;
+}
+#root .dev-pause-btn:hover {
+  background: rgba(161, 163, 166, 0.96);
+}
+#root .dev-pause-btn:active {
+  background: rgba(115, 117, 120, 0.96);
+}
+#root .dev-pause-btn:focus { outline: none; }
+#root .dev-pause-btn:focus-visible {
+  outline: 2px solid #5cd4f2;
+  outline-offset: 2px;
+}
+#root .dev-pause-btn.is-paused {
+  box-shadow: inset 0 3px 0 0 #f3dd6a; /* HUD level yellow when paused */
+}
+
+#root .dev-pause-btn .dev-pause-btn-label {
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 1px;
+  color: #ffffff;
+  -webkit-text-stroke: 0;
+}
+
+
 #root .hud-score-level .hud-text {
   flex: 1;
   position: relative;
@@ -540,6 +655,8 @@
   /* Top accent stripe — colored band hugging the inner top edge of the
      button, like the turret's muzzle-band accent. */
   box-shadow: inset 0 3px 0 0 var(--btn-accent, #cccccc);
+  /* Kill the mobile tap highlight (gray overlay on iOS / Chromium). */
+  -webkit-tap-highlight-color: transparent;
 }
 #root .action-popup-btn:hover {
   background: rgba(161, 163, 166, 0.96);
@@ -547,6 +664,14 @@
 #root .action-popup-btn:active {
   background: rgba(115, 117, 120, 0.96);
   transform: translateY(1px);
+}
+/* Remove the browser's default focus ring for MOUSE focus only.
+   Keyboard focus (Tab nav) still draws an outline via :focus-visible
+   so the popup remains accessible — only the click-flash is gone. */
+#root .action-popup-btn:focus { outline: none; }
+#root .action-popup-btn:focus-visible {
+  outline: 2px solid #5cf2a6;
+  outline-offset: 2px;
 }
 
 #root .action-popup-btn-upgrade { --btn-accent: #5cf2a6; }

@@ -34,7 +34,7 @@ export const TURRET_MAX_HP = 400;
 // damage to polygons. The real threat output is the barrel, not the plate.
 export const TURRET_BODY_DAMAGE_TO_ENTITY = 20;
 export const TURRET_BODY_DAMAGE_FROM_ENTITY = 8;
-export const TURRET_FLUX_COST = 0;
+export const TURRET_FLUX_COST = 200;
 export const TURRET_MAX_COUNT = 8;
 
 // Bullet stats — 1.5× a base lvl-1 player tank shot on damage / penetration /
