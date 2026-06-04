@@ -14,6 +14,11 @@
 // entity pipeline — polygons are neutral world resources, enemies are
 // team-bound.
 
+import {
+  MAX_ENTITY_LEVEL,
+  scaleEnemyDamage,
+  scaleEnemyHp,
+} from '../balance';
 import type { Building } from '../buildings';
 import type { Core } from '../core';
 import { HIT_FLASH_DURATION } from '../entities';
@@ -44,6 +49,26 @@ export interface Enemy {
   reloadRemaining: number;   // seconds until the next shot can fire
   teamId: TeamId;
   ownerId: number;
+  // === Level + per-level scaled stats ===
+  // `level` is the wave-tier (1..MAX_ENTITY_LEVEL). The damage / bullet
+  // numbers below are pre-scaled at spawn from `def × balance.ts growth`,
+  // so kind update fns read from the ENEMY (not from compile-time
+  // constants) and leveling drives behavior without touching kind code.
+  //
+  // To add per-level VISUALS later, branch on `enemy.level` inside the
+  // kind's drawInterior / drawBarrel — both already receive the enemy.
+  // E.g.: `if (enemy.level >= 3) drawTierBPlating(ctx); else drawTierA(ctx);`
+  level: number;
+  bodyDamageToTank: number;
+  bodyDamageToCore: number;
+  bulletReduction: number;
+  // Bullet stats (0 for kinds with no barrel — rusher).
+  bulletDamage: number;
+  bulletHp: number;
+  // Kamikaze burst values (0 for non-kamikaze kinds).
+  kamikazeToTank: number;
+  kamikazeToBuilding: number;
+  kamikazeToCore: number;
 }
 
 // Context the per-kind update fn receives. Centralizes everything any AI
@@ -77,10 +102,24 @@ export interface EnemyUpdateContext {
 export interface EnemyDef {
   kind: EnemyKind;
   radius: number;
+  // === L1 base stat values ===
+  // Per-level scaling formulas in `balance.ts` are applied to THESE at
+  // spawn time; the result is stored on the Enemy. Update fns NEVER read
+  // these directly — they read the scaled values from the Enemy.
   maxHp: number;
   bodyDamageToTank: number;       // dealt per second of contact * impact
   bodyDamageToCore: number;       // dealt per second of contact
   bulletReduction: number;        // per-tick HP loss to bullets that hit us
+  // Optional bullet stats — omit for kinds that don't fire (rusher). Both
+  // damage AND hp scale with level so a high-level enemy's bullets are
+  // both harder-hitting AND harder to shoot down.
+  bulletDamage?: number;
+  bulletHp?: number;
+  // Optional kamikaze burst — populated only for kamikaze kinds (rusher).
+  // Scaled with the same damage growth so high-level kamikazes hit harder.
+  kamikazeToTank?: number;
+  kamikazeToBuilding?: number;
+  kamikazeToCore?: number;
   barrelLength: number;           // 0 = no barrel (e.g. melee-only kind)
   barrelWidth: number;
   // Per-kind movement / AI / firing. Mutates the enemy in place; bullets it
@@ -121,6 +160,10 @@ export function getEnemyDef(kind: EnemyKind): EnemyDef {
 export interface CreateEnemyOptions {
   teamId?: TeamId;
   ownerId?: number;
+  // Wave-tier level (1..MAX_ENTITY_LEVEL). Defaults to 1 — slice 4's wave
+  // manager will pass `levelForWave(currentWave)`. Clamped silently so
+  // callers can pass cycle-number directly past the cap (continue mode).
+  level?: number;
 }
 
 export function createEnemy(
@@ -130,17 +173,32 @@ export function createEnemy(
   options: CreateEnemyOptions = {},
 ): Enemy {
   const def = getEnemyDef(kind);
+  const level = Math.max(1, Math.min(MAX_ENTITY_LEVEL, options.level ?? 1));
+  const maxHp = scaleEnemyHp(def.maxHp, level);
   return {
     id,
     kind,
     pos: { x: center.x, y: center.y },
     vel: { x: 0, y: 0 },
-    hp: def.maxHp,
-    maxHp: def.maxHp,
+    hp: maxHp,
+    maxHp,
     aimAngle: 0,
     reloadRemaining: 0,
     teamId: options.teamId ?? 'red',
     ownerId: options.ownerId ?? 0,
+    level,
+    // Damage / bullet fields scaled once at spawn so the per-frame update
+    // path doesn't pay the cost. Zero defaults make rusher's missing
+    // bullet stats and every non-rusher's missing kamikaze stats safe to
+    // read without optional chaining at the call site.
+    bodyDamageToTank: scaleEnemyDamage(def.bodyDamageToTank, level),
+    bodyDamageToCore: scaleEnemyDamage(def.bodyDamageToCore, level),
+    bulletReduction: scaleEnemyDamage(def.bulletReduction, level),
+    bulletDamage: scaleEnemyDamage(def.bulletDamage ?? 0, level),
+    bulletHp: scaleEnemyDamage(def.bulletHp ?? 0, level),
+    kamikazeToTank: scaleEnemyDamage(def.kamikazeToTank ?? 0, level),
+    kamikazeToBuilding: scaleEnemyDamage(def.kamikazeToBuilding ?? 0, level),
+    kamikazeToCore: scaleEnemyDamage(def.kamikazeToCore ?? 0, level),
   };
 }
 
@@ -182,7 +240,10 @@ export function resolveEnemyBulletCollisions(
       const reach = b.radius + def.radius;
       if (dx * dx + dy * dy > reach * reach) continue;
       let toEnemy = b.damage * tickScale;
-      let toBullet = def.bulletReduction * tickScale;
+      // Bullet HP loss reads the SCALED reduction from the enemy itself,
+      // not the L1 base on the def — so a high-level enemy chews through
+      // bullets faster.
+      let toBullet = e.bulletReduction * tickScale;
       if (toEnemy > e.hp) {
         const sc = e.hp / toEnemy;
         toEnemy *= sc; toBullet *= sc;
@@ -247,7 +308,9 @@ export function resolvePlayerEnemyCollisions(
     playerVel.y += ny * BOUNCE;
     e.vel.x -= nx * BOUNCE;
     e.vel.y -= ny * BOUNCE;
-    const proposedToTank = def.bodyDamageToTank * impact * dt;
+    // Scaled body damage stored on the enemy at spawn — level-aware
+    // without the per-frame lookup paying the cost.
+    const proposedToTank = e.bodyDamageToTank * impact * dt;
     const proposedToEnemy = playerBodyDamageToTank * impact * dt;
     const tankDF =
       proposedToTank > 0 && proposedToTank > tankHp ? tankHp / proposedToTank : 1;
@@ -469,11 +532,12 @@ export function enforceBuildingGap(
 
 // Push out of any hostile core by exactly the enemy's radius (no gap, so the
 // enemy sits flush) and apply continuous core damage while in contact.
+// Reads bodyDamageToCore directly from the enemy — kind-specific scaling
+// already baked in at spawn, so the call site stays kind-agnostic.
 export function applyCoreContact(
   enemy: Enemy,
   cores: Core[],
   dt: number,
-  bodyDamageToCore: number,
   onCoreDamaged?: (core: Core, dmg: number) => void,
 ): void {
   const r = getEnemyDef(enemy.kind).radius;
@@ -487,7 +551,7 @@ export function applyCoreContact(
     if (!mtv) continue;
     enemy.pos.x += mtv.nx * mtv.pen;
     enemy.pos.y += mtv.ny * mtv.pen;
-    const dmg = bodyDamageToCore * dt;
+    const dmg = enemy.bodyDamageToCore * dt;
     c.hp = Math.max(0, c.hp - dmg);
     onCoreDamaged?.(c, dmg);
   }

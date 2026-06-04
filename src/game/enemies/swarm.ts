@@ -40,6 +40,12 @@ import {
   type EnemyUpdateContext,
 } from './enemySystem';
 
+// All damage / bullet stats below are L1 BASE values — the per-level
+// growth formulas in `balance.ts` scale them at spawn time and the result
+// is stored on the Enemy. updateSwarm reads from `enemy.bulletDamage` /
+// `enemy.bulletHp` (not these constants) so leveling drives behavior
+// without touching this file.
+
 const SHRINK = 1.5;
 
 // === Sizing ===
@@ -170,9 +176,7 @@ function updateSwarm(enemy: Enemy, ctx: EnemyUpdateContext): void {
   enemy.pos.x += enemy.vel.x * ctx.dt;
   enemy.pos.y += enemy.vel.y * ctx.dt;
   enforceBuildingGap(enemy, ctx.buildings, SWARM_FRONT_GAP);
-  applyCoreContact(
-    enemy, ctx.cores, ctx.dt, SWARM_BODY_DAMAGE_TO_CORE, ctx.onCoreDamaged,
-  );
+  applyCoreContact(enemy, ctx.cores, ctx.dt, ctx.onCoreDamaged);
 
   // Fire if aim landed on a target inside firing range and reload is up.
   if (
@@ -192,9 +196,12 @@ function updateSwarm(enemy: Enemy, ctx: EnemyUpdateContext): void {
       vel: { x: dirX * SWARM_BULLET_SPEED, y: dirY * SWARM_BULLET_SPEED },
       radius: SWARM_BULLET_RADIUS,
       life: SWARM_BULLET_LIFETIME,
-      hp: SWARM_BULLET_HP,
-      maxHp: SWARM_BULLET_HP,
-      damage: SWARM_BULLET_DAMAGE,
+      // Damage / HP read from the ENEMY (level-scaled at spawn), not from
+      // the SWARM_BULLET_* constants — those are the L1 base values now
+      // flowed through SWARM_DEF below.
+      hp: enemy.bulletHp,
+      maxHp: enemy.bulletHp,
+      damage: enemy.bulletDamage,
       teamId: enemy.teamId,
     });
     enemy.reloadRemaining = SWARM_RELOAD_SECONDS;
@@ -227,6 +234,8 @@ export const SWARM_DEF: EnemyDef = {
   bodyDamageToTank: SWARM_BODY_DAMAGE_TO_TANK,
   bodyDamageToCore: SWARM_BODY_DAMAGE_TO_CORE,
   bulletReduction: SWARM_BULLET_REDUCTION,
+  bulletDamage: SWARM_BULLET_DAMAGE,
+  bulletHp: SWARM_BULLET_HP,
   barrelLength: SWARM_BARREL_LENGTH,
   barrelWidth: SWARM_BARREL_WIDTH,
   update: updateSwarm,

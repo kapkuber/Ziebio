@@ -163,7 +163,10 @@ export function splitOnDeath(
       nextEnemyIdRef.current++,
       'swarm',
       { x: splitter.pos.x + dx, y: splitter.pos.y + dy },
-      { teamId: splitter.teamId, ownerId: splitter.ownerId },
+      // Children inherit the parent's level so an L5 splitter's death
+      // wave is as scary as the parent. Without this an L5 splitter
+      // would spawn L1 swarms — anticlimactic.
+      { teamId: splitter.teamId, ownerId: splitter.ownerId, level: splitter.level },
     ));
   }
 }
@@ -240,9 +243,7 @@ function updateSplitter(enemy: Enemy, ctx: EnemyUpdateContext): void {
   enemy.pos.x += enemy.vel.x * ctx.dt;
   enemy.pos.y += enemy.vel.y * ctx.dt;
   enforceBuildingGap(enemy, ctx.buildings, SPLITTER_FRONT_GAP);
-  applyCoreContact(
-    enemy, ctx.cores, ctx.dt, SPLITTER_BODY_DAMAGE_TO_CORE, ctx.onCoreDamaged,
-  );
+  applyCoreContact(enemy, ctx.cores, ctx.dt, ctx.onCoreDamaged);
 
   // Twin-barrel fire — one shot from each muzzle per reload, both flying
   // along the same aim direction. The perpendicular axis in canvas-local
@@ -266,9 +267,9 @@ function updateSplitter(enemy: Enemy, ctx: EnemyUpdateContext): void {
         vel: { x: dirX * SPLITTER_BULLET_SPEED, y: dirY * SPLITTER_BULLET_SPEED },
         radius: SPLITTER_BULLET_RADIUS,
         life: SPLITTER_BULLET_LIFETIME,
-        hp: SPLITTER_BULLET_HP,
-        maxHp: SPLITTER_BULLET_HP,
-        damage: SPLITTER_BULLET_DAMAGE,
+        hp: enemy.bulletHp,
+        maxHp: enemy.bulletHp,
+        damage: enemy.bulletDamage,
         teamId: enemy.teamId,
       });
     }
@@ -398,6 +399,8 @@ export const SPLITTER_DEF: EnemyDef = {
   bodyDamageToTank: SPLITTER_BODY_DAMAGE_TO_TANK,
   bodyDamageToCore: SPLITTER_BODY_DAMAGE_TO_CORE,
   bulletReduction: SPLITTER_BULLET_REDUCTION,
+  bulletDamage: SPLITTER_BULLET_DAMAGE,
+  bulletHp: SPLITTER_BULLET_HP,
   barrelLength: SPLITTER_BARREL_LENGTH,
   barrelWidth: SPLITTER_BARREL_WIDTH,
   update: updateSplitter,

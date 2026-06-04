@@ -20,7 +20,11 @@ import {
 } from '../stats';
 import { BULLET_LIFETIME, BULLET_RADIUS, type Bullet } from '../tank';
 import { LOCAL_PLAYER_TEAM, type TeamId } from '../teams';
-import type { Building, BuildingDef } from './buildingSystem';
+import {
+  createBuilding,
+  type Building,
+  type BuildingDef,
+} from './buildingSystem';
 
 // === Constants ===
 export const TURRET_GRID_CELLS = 4;
@@ -69,24 +73,21 @@ const CORE_BRIGHT_DESIGN_R = 6;         // accent core (team color)
 const BARREL_HALF_W_DESIGN = 18;        // barrel half-width perpendicular to aim
 
 // === Factory ===
+// Delegates to the shared createBuilding for level scaling, then tacks on
+// the turret-specific runtime state (aim angle, reload). The level-scaled
+// bullet stats land on the building inside createBuilding via the def's
+// bulletDamage / bulletHp fields.
 export function createTurret(
   id: number,
   center: Vec2,
   teamId: TeamId = LOCAL_PLAYER_TEAM,
   ownerId: number = 0,
+  level: number = 1,
 ): Building {
-  return {
-    id,
-    kind: 'turret',
-    pos: { x: center.x, y: center.y },
-    size: TURRET_SIZE,
-    hp: TURRET_MAX_HP,
-    maxHp: TURRET_MAX_HP,
-    ownerId,
-    teamId,
-    aimAngle: -Math.PI / 2, // default barrel points up
-    reloadRemaining: 0,
-  };
+  const b = createBuilding(id, 'turret', center, { teamId, ownerId, level });
+  b.aimAngle = -Math.PI / 2; // default barrel points up
+  b.reloadRemaining = 0;
+  return b;
 }
 
 // === Target acquisition + per-frame update ===
@@ -153,9 +154,13 @@ export function updateTurrets(
         },
         radius: TURRET_BULLET_RADIUS,
         life: TURRET_BULLET_LIFETIME,
-        hp: TURRET_BULLET_HP,
-        maxHp: TURRET_BULLET_HP,
-        damage: TURRET_BULLET_DAMAGE,
+        // Damage / HP read from the BUILDING (level-scaled at spawn).
+        // TURRET_BULLET_DAMAGE / TURRET_BULLET_HP are the L1 base values
+        // now flowing through TURRET_DEF below; the building carries the
+        // scaled values for its own tier.
+        hp: b.bulletHp ?? TURRET_BULLET_HP,
+        maxHp: b.bulletHp ?? TURRET_BULLET_HP,
+        damage: b.bulletDamage ?? TURRET_BULLET_DAMAGE,
         teamId: b.teamId,
         attributable: false,
       });
@@ -177,15 +182,18 @@ export function updateTurrets(
 //   4. Central head cylinder + inner mechanism ring (gray two-tone).
 //   5. Core — accentDim ring + accent bright dot (the only team-colored
 //      elements; pulls the eye to "side X owns this" first).
+// `building.level` available for per-tier visuals — e.g. heavier
+// hardware / extra plating at higher tiers. Branch inside this fn when
+// adding tier variants; don't touch the def shape.
 function drawTurretInterior(
   ctx: CanvasRenderingContext2D,
-  size: number,
+  building: Pick<Building, 'size' | 'level' | 'aimAngle'>,
   accent: string,
   accentDim: string,
   invalid: boolean,
-  aimAngle?: number,
 ): void {
-  const aim = aimAngle ?? -Math.PI / 2;
+  const size = building.size;
+  const aim = building.aimAngle ?? -Math.PI / 2;
   const half = size / 2;
   // Maps reference design units → chassis pixels. With the octagon's flat
   // sides at ±DESIGN_HALF in design space, S * DESIGN_HALF = half, so the
@@ -306,5 +314,7 @@ export const TURRET_DEF: BuildingDef = {
   maxHp: TURRET_MAX_HP,
   bodyDamageToEntity: TURRET_BODY_DAMAGE_TO_ENTITY,
   bodyDamageFromEntity: TURRET_BODY_DAMAGE_FROM_ENTITY,
+  bulletDamage: TURRET_BULLET_DAMAGE,
+  bulletHp: TURRET_BULLET_HP,
   drawInterior: drawTurretInterior,
 };

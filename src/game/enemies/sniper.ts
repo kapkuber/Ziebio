@@ -44,6 +44,11 @@ import {
   type EnemyUpdateContext,
 } from './enemySystem';
 
+// Stat constants below are L1 BASE values — per-level growth formulas in
+// `balance.ts` are applied at spawn and stored on the Enemy. updateSniper
+// reads from `enemy.bulletDamage` / `enemy.bulletHp`, never from these
+// SNIPER_BULLET_* constants directly.
+
 // === Sizing ===
 const SIZE_SCALE = 1.0;
 export const SNIPER_RADIUS = TANK_RADIUS * SIZE_SCALE;
@@ -217,9 +222,7 @@ function updateSniper(enemy: Enemy, ctx: EnemyUpdateContext): void {
   enemy.pos.x += enemy.vel.x * ctx.dt;
   enemy.pos.y += enemy.vel.y * ctx.dt;
   enforceBuildingGap(enemy, ctx.buildings, SNIPER_FRONT_GAP);
-  applyCoreContact(
-    enemy, ctx.cores, ctx.dt, SNIPER_BODY_DAMAGE_TO_CORE, ctx.onCoreDamaged,
-  );
+  applyCoreContact(enemy, ctx.cores, ctx.dt, ctx.onCoreDamaged);
 
   // Fire — no per-shot spread (the sniper is precise by design). Tight
   // FIRE_TOLERANCE keeps the chassis from snapping off shots while still
@@ -240,9 +243,9 @@ function updateSniper(enemy: Enemy, ctx: EnemyUpdateContext): void {
       vel: { x: dirX * SNIPER_BULLET_SPEED, y: dirY * SNIPER_BULLET_SPEED },
       radius: SNIPER_BULLET_RADIUS,
       life: SNIPER_BULLET_LIFETIME,
-      hp: SNIPER_BULLET_HP,
-      maxHp: SNIPER_BULLET_HP,
-      damage: SNIPER_BULLET_DAMAGE,
+      hp: enemy.bulletHp,
+      maxHp: enemy.bulletHp,
+      damage: enemy.bulletDamage,
       teamId: enemy.teamId,
     });
     enemy.reloadRemaining = SNIPER_RELOAD_SECONDS;
@@ -343,6 +346,8 @@ export const SNIPER_DEF: EnemyDef = {
   bodyDamageToTank: SNIPER_BODY_DAMAGE_TO_TANK,
   bodyDamageToCore: SNIPER_BODY_DAMAGE_TO_CORE,
   bulletReduction: SNIPER_BULLET_REDUCTION,
+  bulletDamage: SNIPER_BULLET_DAMAGE,
+  bulletHp: SNIPER_BULLET_HP,
   barrelLength: SNIPER_BARREL_LENGTH,
   barrelWidth: SNIPER_BARREL_WIDTH,
   update: updateSniper,

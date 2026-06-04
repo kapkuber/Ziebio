@@ -11,6 +11,14 @@
 // getTeamPalette(teamId). Friend/foe is determined by teamId; ownerId is
 // reserved for per-player attribution.
 
+import {
+  MAX_ENTITY_LEVEL,
+  buildingSellValue,
+  buildingUpgradeCost,
+  scaleBuildingBodyDamage,
+  scaleBuildingHp,
+  scaleBuildingOutput,
+} from '../balance';
 import { GRID_SIZE } from '../config';
 import type { Core } from '../core';
 import type { GameEntity, Vec2 } from '../entities';
@@ -41,12 +49,32 @@ export interface Building {
   // their own state can extend here rather than introducing a parallel struct.
   aimAngle?: number;        // turret: current barrel angle (radians)
   reloadRemaining?: number; // turret: seconds until next shot can fire
+  // === Level + per-level scaled stats ===
+  // `level` is the building tier (1..MAX_ENTITY_LEVEL). The damage / output
+  // numbers below are pre-scaled at spawn from `def × balance.ts growth`,
+  // so update code reads from the BUILDING (not from compile-time
+  // constants) and leveling drives behavior without touching kind code.
+  //
+  // To add per-level VISUALS later, branch on `building.level` inside the
+  // kind's drawInterior — it receives the building as its first arg.
+  // E.g.: `if (building.level >= 3) drawTierBPlate(ctx); else drawTierA(ctx);`
+  level: number;
+  bodyDamageToEntity: number;
+  bodyDamageFromEntity: number;
+  // Optional bullet stats — populated only for kinds that fire (turret).
+  bulletDamage?: number;
+  bulletHp?: number;
+  // Optional production rate — populated only for kinds that yield flux.
+  fluxPerSecond?: number;
 }
 
 // Per-kind contract used by cross-kind logic. Anything kind-specific that the
 // MANAGER needs goes here. Kind-internal constants (flux cost, max-count,
-// production rate, etc.) stay as exports on the per-kind module and are
-// imported directly by callers that care.
+// etc.) stay as exports on the per-kind module and are imported directly by
+// callers that care.
+//
+// All stat fields here are L1 BASE values — per-level growth in `balance.ts`
+// scales them at creation and stores the result on the Building.
 export interface BuildingDef {
   kind: BuildingKind;
   gridCells: number;
@@ -54,19 +82,79 @@ export interface BuildingDef {
   maxHp: number;
   bodyDamageToEntity: number;   // dealt to polygons per second of overlap
   bodyDamageFromEntity: number; // taken from polygons per second of overlap
-  // Renders the kind-specific interior. The shared chassis plate and HP bar
-  // are drawn by the manager; the caller has translated the canvas origin
-  // to the building center and set a default stroke style/width. `aimAngle`
-  // is threaded through for kinds with a rotating element (turret); kinds
-  // without state simply ignore it.
+  // Optional bullet stats — populated only for kinds that fire (turret).
+  // Both damage AND hp scale with level so high-level turret shots are
+  // both harder-hitting AND harder to shoot down.
+  bulletDamage?: number;
+  bulletHp?: number;
+  // Optional production rate — populated only for kinds that produce flux
+  // (flux-generator). Scales with the building output growth exponent.
+  fluxPerSecond?: number;
+  // Renders the kind-specific interior. The caller has translated the
+  // canvas origin to the building center and set a default stroke style.
+  // The (Pick of) `building` arg gives the renderer access to `size`,
+  // `level`, and `aimAngle` — branch on `building.level` to swap visuals
+  // per tier without changing the def shape. New per-level visual data
+  // (e.g. evolution stage, palette override) can be added to the Pick
+  // without touching every callsite.
   drawInterior: (
     ctx: CanvasRenderingContext2D,
-    size: number,
+    building: Pick<Building, 'size' | 'level' | 'aimAngle'>,
     accent: string,
     accentDim: string,
     invalid: boolean,
-    aimAngle?: number,
   ) => void;
+}
+
+// === Factory ===
+// Shared builder for all building kinds. Per-kind `create*` factories call
+// through to this with their kind, so the level-scaling logic lives in one
+// place. Optional bullet / flux fields stay 0 / undefined for kinds whose
+// def doesn't supply them — callers that read those fields branch on the
+// presence (turret reads bulletDamage/bulletHp, flux-gen reads fluxPerSecond).
+export interface CreateBuildingOptions {
+  teamId?: TeamId;
+  ownerId?: number;
+  // Building tier (1..MAX_ENTITY_LEVEL). Defaults to 1; slice 4's wave +
+  // core systems will pass the current-unlocked tier. Clamped silently.
+  level?: number;
+}
+
+export function createBuilding(
+  id: number,
+  kind: BuildingKind,
+  center: Vec2,
+  options: CreateBuildingOptions = {},
+): Building {
+  const def = getBuildingDef(kind);
+  const level = Math.max(1, Math.min(MAX_ENTITY_LEVEL, options.level ?? 1));
+  const maxHp = scaleBuildingHp(def.maxHp, level);
+  const building: Building = {
+    id,
+    kind,
+    pos: { x: center.x, y: center.y },
+    size: def.size,
+    hp: maxHp,
+    maxHp,
+    ownerId: options.ownerId ?? 0,
+    teamId: options.teamId ?? ('red' as TeamId),
+    level,
+    bodyDamageToEntity: scaleBuildingBodyDamage(def.bodyDamageToEntity, level),
+    bodyDamageFromEntity: scaleBuildingBodyDamage(def.bodyDamageFromEntity, level),
+  };
+  // Output / bullet fields land on the building only when the def provides
+  // them. Output growth differs from body-damage growth (1.3 vs 1.18) so
+  // late-game flux generators / turrets feel like real upgrades.
+  if (def.bulletDamage !== undefined) {
+    building.bulletDamage = scaleBuildingOutput(def.bulletDamage, level);
+  }
+  if (def.bulletHp !== undefined) {
+    building.bulletHp = scaleBuildingOutput(def.bulletHp, level);
+  }
+  if (def.fluxPerSecond !== undefined) {
+    building.fluxPerSecond = scaleBuildingOutput(def.fluxPerSecond, level);
+  }
+  return building;
 }
 
 // === Per-kind registry ===
@@ -80,6 +168,139 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
 
 export function getBuildingDef(kind: BuildingKind): BuildingDef {
   return BUILDING_DEFS[kind];
+}
+
+// === Upgrade / sell ===
+// Stat preview for the action-popup. Returns the before/after numbers
+// the popup needs to render its "current → next" rows. Returns null when
+// the building is already at the level cap or when upgrading would
+// exceed the supplied core-level gate (player hasn't upgraded the core
+// far enough to unlock the next tier).
+//
+// Per-kind stat fields populated only when the def supplies the
+// corresponding L1 base (e.g. flux-gen → fluxPerSecond, turret →
+// bulletDamage). The popup component renders whichever fields are
+// present; non-applicable rows are absent rather than zeroed.
+export interface BuildingUpgradePreview {
+  fromLevel: number;
+  toLevel: number;
+  cost: number;
+  // Always populated.
+  hpBefore: number;
+  hpAfter: number;
+  hpDelta: number;
+  bodyDamageBefore: number;
+  bodyDamageAfter: number;
+  bodyDamageDelta: number;
+  // Turret-only.
+  bulletDamageBefore?: number;
+  bulletDamageAfter?: number;
+  bulletDamageDelta?: number;
+  // Flux-gen-only.
+  fluxPerSecondBefore?: number;
+  fluxPerSecondAfter?: number;
+  fluxPerSecondDelta?: number;
+}
+
+export function previewBuildingUpgrade(
+  building: Building,
+  coreLevelCap: number,
+): BuildingUpgradePreview | null {
+  if (building.level >= MAX_ENTITY_LEVEL) return null;
+  const toLevel = building.level + 1;
+  if (toLevel > coreLevelCap) return null;
+  const def = getBuildingDef(building.kind);
+  const cost = buildingUpgradeCost(building.kind, building.level);
+  const hpAfter = scaleBuildingHp(def.maxHp, toLevel);
+  const bdAfter = scaleBuildingBodyDamage(def.bodyDamageToEntity, toLevel);
+  const preview: BuildingUpgradePreview = {
+    fromLevel: building.level,
+    toLevel,
+    cost,
+    hpBefore: building.maxHp,
+    hpAfter,
+    hpDelta: hpAfter - building.maxHp,
+    bodyDamageBefore: building.bodyDamageToEntity,
+    bodyDamageAfter: bdAfter,
+    bodyDamageDelta: bdAfter - building.bodyDamageToEntity,
+  };
+  if (def.bulletDamage !== undefined) {
+    const after = scaleBuildingOutput(def.bulletDamage, toLevel);
+    const before = building.bulletDamage ?? 0;
+    preview.bulletDamageBefore = before;
+    preview.bulletDamageAfter = after;
+    preview.bulletDamageDelta = after - before;
+  }
+  if (def.fluxPerSecond !== undefined) {
+    const after = scaleBuildingOutput(def.fluxPerSecond, toLevel);
+    const before = building.fluxPerSecond ?? 0;
+    preview.fluxPerSecondBefore = before;
+    preview.fluxPerSecondAfter = after;
+    preview.fluxPerSecondDelta = after - before;
+  }
+  return preview;
+}
+
+// Mutates the building in place: bumps level, re-scales every stat field
+// using the same balance formulas createBuilding uses, full-heals to the
+// new maxHp. Caller deducts flux BEFORE calling. Returns true on success.
+//
+// Re-running the scaling formulas (rather than applying deltas) is
+// deliberately idempotent: tweaking a growth exponent in balance.ts
+// retroactively gives consistent values for any upgrade that runs after
+// the change. Mid-game stat drift on a hot-reload is fine; what we want
+// to avoid is drift between two L3 buildings that took different upgrade
+// paths.
+export function upgradeBuilding(building: Building, coreLevelCap: number): boolean {
+  if (building.level >= MAX_ENTITY_LEVEL) return false;
+  if (building.level + 1 > coreLevelCap) return false;
+  const def = getBuildingDef(building.kind);
+  building.level += 1;
+  building.maxHp = scaleBuildingHp(def.maxHp, building.level);
+  building.hp = building.maxHp;
+  building.bodyDamageToEntity = scaleBuildingBodyDamage(def.bodyDamageToEntity, building.level);
+  building.bodyDamageFromEntity = scaleBuildingBodyDamage(def.bodyDamageFromEntity, building.level);
+  if (def.bulletDamage !== undefined) {
+    building.bulletDamage = scaleBuildingOutput(def.bulletDamage, building.level);
+  }
+  if (def.bulletHp !== undefined) {
+    building.bulletHp = scaleBuildingOutput(def.bulletHp, building.level);
+  }
+  if (def.fluxPerSecond !== undefined) {
+    building.fluxPerSecond = scaleBuildingOutput(def.fluxPerSecond, building.level);
+  }
+  return true;
+}
+
+// Flux refund for selling a building. Just a re-export so callers reading
+// "what does this sell for" don't have to know the formula lives in
+// balance.ts. The actual removal is done by the caller (filter out by id).
+export function buildingSellRefund(building: Building): number {
+  return buildingSellValue(building.kind, building.level);
+}
+
+// === Click hit-test ===
+// Returns the friendly building whose AABB contains the world-space
+// point, or null. Used by the action-popup click handler to detect
+// whether the player clicked a building to open its upgrade dialog.
+// Hostile buildings are skipped — clicking them never opens a popup.
+// Walks back-to-front so the topmost match wins if overlap ever happens.
+export function findBuildingAtPoint(
+  buildings: Building[],
+  teamId: TeamId,
+  x: number,
+  y: number,
+): Building | null {
+  for (let i = buildings.length - 1; i >= 0; i--) {
+    const b = buildings[i];
+    if (b.hp <= 0 || b.teamId !== teamId) continue;
+    const half = b.size * 0.5;
+    if (x >= b.pos.x - half && x <= b.pos.x + half &&
+        y >= b.pos.y - half && y <= b.pos.y + half) {
+      return b;
+    }
+  }
+  return null;
 }
 
 // === Buildable zone ===
@@ -238,9 +459,10 @@ export function resolveBuildingEntityCollisions(
       e.kick.x += mtv.nx * KICK;
       e.kick.y += mtv.ny * KICK;
 
-      const def = getBuildingDef(b.kind);
-      e.hp = Math.max(0, e.hp - def.bodyDamageToEntity * dt);
-      b.hp = Math.max(0, b.hp - def.bodyDamageFromEntity * dt);
+      // Scaled body damage stored on the building at spawn — kind-agnostic
+      // here, and level-aware without a per-frame def lookup.
+      e.hp = Math.max(0, e.hp - b.bodyDamageToEntity * dt);
+      b.hp = Math.max(0, b.hp - b.bodyDamageFromEntity * dt);
       if (b.hp <= 0) deadIds.push(b.id);
       if (e.hp <= 0) {
         onEntityKilled(e);
@@ -317,9 +539,13 @@ export interface DrawBuildingOptions {
   hpRatio?: number;   // 0..1
 }
 
+// `building` carries level so per-kind drawInterior can branch on tier
+// for visuals. Placement previews construct an ad-hoc partial; they pass
+// the level the player would PLACE at (current core unlock cap, or 1 in
+// the pre-wave era).
 export function drawBuilding(
   ctx: CanvasRenderingContext2D,
-  building: Pick<Building, 'pos' | 'size' | 'teamId' | 'kind' | 'aimAngle'>,
+  building: Pick<Building, 'pos' | 'size' | 'teamId' | 'kind' | 'aimAngle' | 'level'>,
   camera: { x: number; y: number; width: number; height: number },
   options: DrawBuildingOptions = {},
 ): void {
@@ -350,9 +576,11 @@ export function drawBuilding(
   ctx.stroke();
 
   // Per-kind interior. The def encapsulates everything kind-specific about
-  // the visual; this dispatch is the single point of variance.
+  // the visual; this dispatch is the single point of variance. The
+  // `building` slice exposes size + level + aimAngle so kinds can branch
+  // on level for per-tier visuals.
   getBuildingDef(building.kind).drawInterior(
-    ctx, building.size, accent, accentDim, invalid, building.aimAngle,
+    ctx, building, accent, accentDim, invalid,
   );
 
   // Inner HP bar — shared with cores and all future buildings.

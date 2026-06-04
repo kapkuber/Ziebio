@@ -26,7 +26,6 @@ import {
   BASE_BULLET_DAMAGE,
   BASE_BULLET_HP,
   BASE_BULLET_SPEED,
-  BASE_HP,
   BASE_RELOAD_TICKS,
   BODY_DAMAGE_BASE,
   BODY_DAMAGE_MULT_TANK,
@@ -41,6 +40,11 @@ import {
   type EnemyDef,
   type EnemyUpdateContext,
 } from './enemySystem';
+
+// Stat constants below are L1 BASE values — per-level growth formulas in
+// `balance.ts` are applied at spawn and stored on the Enemy. updateGunner
+// reads from `enemy.bulletDamage` / `enemy.bulletHp`, never from these
+// GUNNER_BULLET_* constants directly.
 
 // === Sizing ===
 const SIZE_SCALE = 1.1;
@@ -81,7 +85,13 @@ export const GUNNER_BARREL_LENGTH = BARREL_MUZZLE_X - BARREL_BREECH_X;
 export const GUNNER_BARREL_WIDTH = BARREL_MUZZLE_HALF_W * 2;
 
 // === Stats ===
-export const GUNNER_MAX_HP = BASE_HP * 3;
+// 2.2× a fresh lvl-1 player tank. Originally 3× (150 HP), trimmed during
+// balance pass — the original value combined with 0.3 s reload created a
+// solo-fight that was unwinnable for an unprepared L4 player even with
+// kiting. At 110 HP the player + 1 turret can burn it down in ~3-4 s
+// instead of ~9 s, which keeps wave 3 (gunner's first appearance) within
+// medium-difficulty reach.
+export const GUNNER_MAX_HP = 110;
 
 export const GUNNER_BODY_DAMAGE_TO_TANK =
   BODY_DAMAGE_BASE * BODY_DAMAGE_MULT_TANK * 1.5;
@@ -199,9 +209,7 @@ function updateGunner(enemy: Enemy, ctx: EnemyUpdateContext): void {
   enemy.pos.x += enemy.vel.x * ctx.dt;
   enemy.pos.y += enemy.vel.y * ctx.dt;
   enforceBuildingGap(enemy, ctx.buildings, GUNNER_FRONT_GAP);
-  applyCoreContact(
-    enemy, ctx.cores, ctx.dt, GUNNER_BODY_DAMAGE_TO_CORE, ctx.onCoreDamaged,
-  );
+  applyCoreContact(enemy, ctx.cores, ctx.dt, ctx.onCoreDamaged);
 
   // Fire — each shot picks a fresh random deviation inside ±SPREAD_DEG so
   // the bullets fan out into a cone instead of forming a perfect line. The
@@ -227,9 +235,9 @@ function updateGunner(enemy: Enemy, ctx: EnemyUpdateContext): void {
       vel: { x: dirX * GUNNER_BULLET_SPEED, y: dirY * GUNNER_BULLET_SPEED },
       radius: GUNNER_BULLET_RADIUS,
       life: GUNNER_BULLET_LIFETIME,
-      hp: GUNNER_BULLET_HP,
-      maxHp: GUNNER_BULLET_HP,
-      damage: GUNNER_BULLET_DAMAGE,
+      hp: enemy.bulletHp,
+      maxHp: enemy.bulletHp,
+      damage: enemy.bulletDamage,
       teamId: enemy.teamId,
     });
     enemy.reloadRemaining = GUNNER_RELOAD_SECONDS;
@@ -316,6 +324,8 @@ export const GUNNER_DEF: EnemyDef = {
   bodyDamageToTank: GUNNER_BODY_DAMAGE_TO_TANK,
   bodyDamageToCore: GUNNER_BODY_DAMAGE_TO_CORE,
   bulletReduction: GUNNER_BULLET_REDUCTION,
+  bulletDamage: GUNNER_BULLET_DAMAGE,
+  bulletHp: GUNNER_BULLET_HP,
   barrelLength: GUNNER_BARREL_LENGTH,
   // Custom drawBarrel replaces the default rect, so this width is only the
   // outer dimension (muzzle width) for any future code that asks for it.

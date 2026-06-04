@@ -7,7 +7,11 @@
 import { GRID_SIZE } from '../config';
 import type { Vec2 } from '../entities';
 import { LOCAL_PLAYER_TEAM, type TeamId } from '../teams';
-import type { Building, BuildingDef } from './buildingSystem';
+import {
+  createBuilding,
+  type Building,
+  type BuildingDef,
+} from './buildingSystem';
 
 // === Constants ===
 export const FLUX_GEN_GRID_CELLS = 4;
@@ -23,46 +27,49 @@ export const FLUX_GEN_MAX_COUNT = 8;
 export const FLUX_GEN_RATE_PER_SECOND = 2;
 
 // === Factory ===
+// Delegates to the shared createBuilding so level scaling lives in one
+// place. Each generator carries its level-scaled `fluxPerSecond`, set
+// from FLUX_GEN_RATE_PER_SECOND × balance growth at spawn.
 export function createFluxGenerator(
   id: number,
   center: Vec2,
   teamId: TeamId = LOCAL_PLAYER_TEAM,
   ownerId: number = 0,
+  level: number = 1,
 ): Building {
-  return {
-    id,
-    kind: 'flux-generator',
-    pos: { x: center.x, y: center.y },
-    size: FLUX_GEN_SIZE,
-    hp: FLUX_GEN_MAX_HP,
-    maxHp: FLUX_GEN_MAX_HP,
-    ownerId,
-    teamId,
-  };
+  return createBuilding(id, 'flux-generator', center, { teamId, ownerId, level });
 }
 
 // === Production ===
 // Sum flux produced this frame across all live, friendly generators.
-// Production is fractional per frame; the caller floors for display.
+// Reads the per-building `fluxPerSecond` (level-scaled at spawn) so mixed
+// tiers in the same farm compose correctly. Production is fractional
+// per frame; the caller floors for display.
 export function fluxProducedThisFrame(buildings: Building[], teamId: TeamId, dt: number): number {
-  let count = 0;
+  let total = 0;
   for (const b of buildings) {
-    if (b.kind === 'flux-generator' && b.teamId === teamId && b.hp > 0) count++;
+    if (b.kind !== 'flux-generator' || b.teamId !== teamId || b.hp <= 0) continue;
+    total += b.fluxPerSecond ?? 0;
   }
-  return count * FLUX_GEN_RATE_PER_SECOND * dt;
+  return total * dt;
 }
 
 // === Interior render ===
 // Drawn after the manager's shared plate; origin already at the tile center.
 // Recessed octagonal panel with a central team-accent diamond — the inner
 // darker core pulses to signal active flux production.
+//
+// `building.level` is available for per-tier visuals — e.g. extra rings
+// on the diamond at L3+, or a denser pulse on L5. Branch here when
+// adding tier variants.
 function drawFluxGeneratorInterior(
   ctx: CanvasRenderingContext2D,
-  size: number,
+  building: Pick<Building, 'size' | 'level' | 'aimAngle'>,
   accent: string,
   accentDim: string,
   invalid: boolean,
 ): void {
+  const size = building.size;
   const half = size / 2;
 
   // Recessed octagonal panel (darker plate, matches the core's main plate).
@@ -118,5 +125,6 @@ export const FLUX_GEN_DEF: BuildingDef = {
   maxHp: FLUX_GEN_MAX_HP,
   bodyDamageToEntity: FLUX_GEN_BODY_DAMAGE_TO_ENTITY,
   bodyDamageFromEntity: FLUX_GEN_BODY_DAMAGE_FROM_ENTITY,
+  fluxPerSecond: FLUX_GEN_RATE_PER_SECOND,
   drawInterior: drawFluxGeneratorInterior,
 };

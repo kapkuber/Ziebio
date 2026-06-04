@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Vec2 as EntVec2, GameEntity } from "./game/entities";
 import {
   SQUARE_MAX_COUNT,
@@ -57,8 +57,11 @@ import {
   drawCore,
   resolveCoreBulletCollisions,
   resolveCoreEntityCollisions,
+  findCoreAtPoint,
+  previewCoreUpgrade,
   resolvePlayerCoreCollisions,
   snapCoreCenter,
+  upgradeCore,
   validateCorePlacement,
   type Core,
 } from "./game/core";
@@ -73,21 +76,27 @@ import {
   TURRET_GRID_CELLS,
   TURRET_FLUX_COST,
   TURRET_MAX_COUNT,
+  buildingSellRefund,
   createWall,
   createFluxGenerator,
   createTurret,
   drawBuilding,
   drawBuildableZone,
+  findBuildingAtPoint,
   fluxProducedThisFrame,
+  previewBuildingUpgrade,
   resolveBuildingBulletCollisions,
   resolveBuildingEntityCollisions,
   resolvePlayerBuildingCollisions,
   snapBuildingCenter,
   updateTurrets,
+  upgradeBuilding,
   validateBuildingPlacement,
   type Building,
   type TurretTarget,
 } from "./game/buildings";
+import { ActionPopup } from "./components/BuildingActionPopup";
+import { MAX_ENTITY_LEVEL } from "./game/balance";
 import { LOCAL_PLAYER_TEAM } from "./game/teams";
 import {
   createEnemy,
@@ -199,6 +208,37 @@ export default function TankShooter() {
   // flux changes — ~16/sec at the 8-generator cap).
   const fluxRef = useRef<number>(0);
   const [flux, setFlux] = useState<number>(0);
+  // Action-popup state. Opens when the player left-clicks a friendly
+  // building or core; closes on outside-click, on Escape, or on action
+  // (upgrade / sell). The id refers back to buildingsRef / coresRef so
+  // the popup always renders against fresh stats (HP under fire, etc.).
+  // Screen coords are captured at click time so the popup stays put if
+  // the camera moves underneath.
+  // Just kind + id — screen position is computed each render from the
+  // target's world position + the live camera so the popup stays glued
+  // to the building when the player moves underneath the camera.
+  type PopupTarget =
+    | { kind: 'building'; id: number }
+    | { kind: 'core'; id: number };
+  const [popupTarget, setPopupTargetState] = useState<PopupTarget | null>(null);
+  // Ref-mirror so the mousedown closure (registered once) can read the
+  // current popup state without re-binding every render. setPopupTarget
+  // updates both at once; downstream code uses setPopupTarget exclusively.
+  const popupTargetRef = useRef<PopupTarget | null>(null);
+  const setPopupTarget = (next: PopupTarget | null) => {
+    popupTargetRef.current = next;
+    setPopupTargetState(next);
+  };
+  // Force-tick state to refresh the popup once per frame while it's open
+  // (so HP / affordability changes are visible). Cheap because React skips
+  // re-renders when the value stays identical.
+  const [popupTick, setPopupTick] = useState<number>(0);
+  // Direct DOM handle for the popup's outer div. The canvas frame loop
+  // writes `style.transform` here every tick from the same camera math
+  // that draws the canvas — so the popup is glued to its target with no
+  // React-commit lag (matches zombs.io's "panel stuck to the structure"
+  // behavior). React only owns the popup's content; never its position.
+  const popupElRef = useRef<HTMLDivElement | null>(null);
   // Dev-only: 'k' tags this each press; the frame loop consumes the flag
   // and damages whatever building/core sits under the cursor (10% of its
   // max HP). Lets us exercise the damage / game-over flows without having
@@ -224,6 +264,20 @@ export default function TankShooter() {
   const [playerStats, setPlayerStats] = useState<StatPoints>({ ...INITIAL_STATS });
   const [playerProgress, setPlayerProgress] = useState({ level: 1, xp: 0 });
   const [score, setScore] = useState(0);
+  // Max friendly core level — the cap on placeable / upgradeable building
+  // tier. Read fresh from coresRef at every call so a freshly-upgraded
+  // core unlocks the next tier immediately (no useState round-trip). Used
+  // by both the placement callbacks (which level new buildings to the
+  // unlocked tier) and the action popup (which uses it to gate upgrades).
+  const computeBuildableLevelCap = (): number => {
+    let cap = 1;
+    for (const c of coresRef.current) {
+      if (c.teamId === LOCAL_PLAYER_TEAM && c.hp > 0 && c.level > cap) {
+        cap = c.level;
+      }
+    }
+    return cap;
+  };
   // Alive flag is a ref for the frame loop (no re-render needed), and a
   // mirror state to drive the death overlay UI.
   const aliveRef = useRef(true);
@@ -266,7 +320,9 @@ export default function TankShooter() {
           previewCoreRef.current = { center: snapped, valid: v.valid };
           drawCore(
             ctx,
-            { pos: snapped, size: CORE_SIZE, teamId: LOCAL_PLAYER_TEAM },
+            // Initial core placement is always L1; subsequent upgrades
+            // happen via the action popup.
+            { pos: snapped, size: CORE_SIZE, teamId: LOCAL_PLAYER_TEAM, level: 1 },
             camera,
             { alpha: 0.45, invalid: !v.valid },
           );
@@ -299,7 +355,8 @@ export default function TankShooter() {
           previewWallRef.current = { center: snapped, valid };
           drawBuilding(
             ctx,
-            { pos: snapped, size: WALL_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'wall' },
+            // Preview tier matches what'll be placed (current core unlock).
+            { pos: snapped, size: WALL_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'wall', level: computeBuildableLevelCap() },
             camera,
             { alpha: 0.5, invalid: !valid },
           );
@@ -310,7 +367,7 @@ export default function TankShooter() {
           fluxRef.current -= WALL_FLUX_COST;
           buildingsRef.current = [
             ...buildingsRef.current,
-            createWall(nextBuildingIdRef.current++, p.center),
+            createWall(nextBuildingIdRef.current++, p.center, LOCAL_PLAYER_TEAM, 0, computeBuildableLevelCap()),
           ];
           return true;
         },
@@ -330,7 +387,7 @@ export default function TankShooter() {
           previewFluxGenRef.current = { center: snapped, valid: v.valid };
           drawBuilding(
             ctx,
-            { pos: snapped, size: FLUX_GEN_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'flux-generator' },
+            { pos: snapped, size: FLUX_GEN_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'flux-generator', level: computeBuildableLevelCap() },
             camera,
             { alpha: 0.5, invalid: !v.valid },
           );
@@ -340,7 +397,7 @@ export default function TankShooter() {
           if (!p || !p.valid) return false;
           buildingsRef.current = [
             ...buildingsRef.current,
-            createFluxGenerator(nextBuildingIdRef.current++, p.center),
+            createFluxGenerator(nextBuildingIdRef.current++, p.center, LOCAL_PLAYER_TEAM, 0, computeBuildableLevelCap()),
           ];
           return true;
         },
@@ -362,7 +419,7 @@ export default function TankShooter() {
           previewTurretRef.current = { center: snapped, valid };
           drawBuilding(
             ctx,
-            { pos: snapped, size: TURRET_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'turret' },
+            { pos: snapped, size: TURRET_SIZE, teamId: LOCAL_PLAYER_TEAM, kind: 'turret', level: computeBuildableLevelCap() },
             camera,
             { alpha: 0.5, invalid: !valid },
           );
@@ -373,7 +430,7 @@ export default function TankShooter() {
           fluxRef.current -= TURRET_FLUX_COST;
           buildingsRef.current = [
             ...buildingsRef.current,
-            createTurret(nextBuildingIdRef.current++, p.center),
+            createTurret(nextBuildingIdRef.current++, p.center, LOCAL_PLAYER_TEAM, 0, computeBuildableLevelCap()),
           ];
           return true;
         },
@@ -475,6 +532,39 @@ export default function TankShooter() {
       // (even if placement failed) so we don't fall through to shooting or
       // arm mouseDownRef — releasing the mode key mid-hold would auto-fire.
       if (placement.handleClick()) return;
+      // Click-to-popup: friendly building or core under the cursor opens
+      // an upgrade/sell dialog. Click-outside on an open popup closes it
+      // (the popup component itself stops propagation on inside clicks,
+      // so this handler only fires for outside-clicks).
+      const canvas = canvasRef.current;
+      if (canvas && aliveRef.current && !coreDestroyedRef.current) {
+        const rect = canvas.getBoundingClientRect();
+        const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
+        const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
+        const camX = tankPosRef.current.x - rect.width / zoom / 2;
+        const camY = tankPosRef.current.y - rect.height / zoom / 2;
+        const wx = camX + mouseRef.current.x / zoom;
+        const wy = camY + mouseRef.current.y / zoom;
+        // Building first — buildings sit visually on top of cores. Then
+        // fall through to core, then to the open-popup-dismiss path.
+        const hitBuilding = findBuildingAtPoint(buildingsRef.current, LOCAL_PLAYER_TEAM, wx, wy);
+        if (hitBuilding) {
+          setPopupTarget({ kind: 'building', id: hitBuilding.id });
+          return;
+        }
+        const hitCore = findCoreAtPoint(coresRef.current, LOCAL_PLAYER_TEAM, wx, wy);
+        if (hitCore) {
+          setPopupTarget({ kind: 'core', id: hitCore.id });
+          return;
+        }
+        // No structure under cursor — if a popup is open, the outside-
+        // click dismisses it WITHOUT firing a bullet (keeps "clicking
+        // the world to close" feeling intentional, not weaponized).
+        if (popupTargetRef.current) {
+          setPopupTarget(null);
+          return;
+        }
+      }
       mouseDownRef.current = true;
       // Respect global cooldown
       if (cooldownRemainingRef.current <= 0) {
@@ -524,6 +614,13 @@ export default function TankShooter() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.repeat) return;
+      // Escape closes the action popup regardless of which other key
+      // bindings are active. Bound first so it can't be swallowed by a
+      // mode handler.
+      if (e.key === 'Escape' && popupTargetRef.current) {
+        setPopupTarget(null);
+        return;
+      }
       const k = e.key.toLowerCase();
       // Placement-mode toggles (c/v/x) are routed through the controller.
       // It handles mutual exclusion, canEnter gates, sticky/non-sticky exits,
@@ -687,6 +784,36 @@ export default function TankShooter() {
       }
 
       const camera = getCamera(zoom);
+
+      // === Popup position update (in lockstep with canvas) ===
+      // Write `transform: translate(...)` directly to the popup's DOM
+      // element from the SAME camera the canvas draws with this frame.
+      // No React commit in between → no 1-frame lag, no "popup follows
+      // a frame behind" feel. The 8 px horizontal offset keeps the
+      // popup just off the structure's right edge.
+      {
+        const target = popupTargetRef.current;
+        const el = popupElRef.current;
+        if (target && el) {
+          let pos: { x: number; y: number } | null = null;
+          let size = 0;
+          if (target.kind === 'building') {
+            const b = buildingsRef.current.find((bb) => bb.id === target.id);
+            if (b && b.hp > 0) { pos = b.pos; size = b.size; }
+          } else {
+            const c = coresRef.current.find((cc) => cc.id === target.id);
+            if (c && c.hp > 0) { pos = c.pos; size = c.size; }
+          }
+          if (pos) {
+            const rect = canvas.getBoundingClientRect();
+            const half = size / 2;
+            const sx = rect.left + (pos.x + half - camera.x) * zoom + 8;
+            const sy = rect.top + (pos.y - half - camera.y) * zoom;
+            el.style.transform = `translate(${sx}px, ${sy}px)`;
+          }
+        }
+      }
+
       drawGrid(ctx, camera, gridPatternsRef.current);
       // Entities update/draw via module
       const KIND_CAPS: Record<'square'|'triangle'|'pentagon', number> = {
@@ -1282,6 +1409,10 @@ export default function TankShooter() {
       // no-op, so this only triggers a HUD re-render at whole-flux boundaries
       // (~16/sec at the 8-gen cap).
       setFlux(Math.floor(fluxRef.current));
+      // Keep the action popup live while it's open: bump tick once per
+      // frame so HP / affordability re-evaluate against the latest refs.
+      // No-op when no popup is mounted.
+      if (popupTargetRef.current) setPopupTick((t) => t + 1);
       requestAnimationFrame(frame);
     }
 
@@ -1325,6 +1456,74 @@ export default function TankShooter() {
     setDeathInfo(null);
     aliveRef.current = true;
   };
+
+  // === Action popup derivation ===
+  // Computes the popup props from the current popupTarget + the live
+  // refs each render. `popupTick` triggers a re-render once per frame
+  // while a popup is open, so HP / affordability / unlock-state changes
+  // stay in sync without coupling the popup to game-loop ticks directly.
+  // (popupTick used implicitly via render lifecycle; reading it keeps
+  // the linter quiet and makes the dependency explicit.)
+  void popupTick;
+
+  // Friendly display name per kind. Defined inline so adding a kind is
+  // one entry, not a new helper file.
+  const BUILDING_KIND_LABEL: Record<Building['kind'], string> = {
+    'wall': 'Wall',
+    'turret': 'Turret',
+    'flux-generator': 'Flux Generator',
+  };
+
+  // Max friendly core level — the cap on placeable / upgradeable
+  // building tier. The shared helper is used both here (for the popup's
+  // upgrade gate) and by the placement callbacks (which level new
+  // buildings to the unlocked tier).
+  const buildableLevelCap = computeBuildableLevelCap();
+
+  // If the popup's target died or was sold off, close it after render.
+  // Doing the cleanup in a useEffect avoids the "setState during render"
+  // warning. Runs whenever popupTarget or popupTick changes.
+  useEffect(() => {
+    if (!popupTarget) return;
+    const alive = popupTarget.kind === 'building'
+      ? buildingsRef.current.some((b) => b.id === popupTarget.id && b.hp > 0)
+      : coresRef.current.some((c) => c.id === popupTarget.id && c.hp > 0);
+    if (!alive) setPopupTarget(null);
+  }, [popupTarget, popupTick]);
+
+  // Synchronous initial-position writer. The canvas frame loop owns
+  // per-frame transform updates, but on mount there's a paint between
+  // React commit and the next requestAnimationFrame — without this the
+  // popup would flash at viewport (0, 0) for one frame. useLayoutEffect
+  // runs after DOM commit but BEFORE paint, so writing the transform
+  // here means the first paint already shows the popup at the right
+  // spot. Duplicates a few lines of camera math vs the frame loop;
+  // acceptable for the polish.
+  useLayoutEffect(() => {
+    if (!popupTarget) return;
+    const el = popupElRef.current;
+    const canvas = canvasRef.current;
+    if (!el || !canvas) return;
+    let pos: { x: number; y: number } | null = null;
+    let size = 0;
+    if (popupTarget.kind === 'building') {
+      const b = buildingsRef.current.find((bb) => bb.id === popupTarget.id);
+      if (b && b.hp > 0) { pos = b.pos; size = b.size; }
+    } else {
+      const c = coresRef.current.find((cc) => cc.id === popupTarget.id);
+      if (c && c.hp > 0) { pos = c.pos; size = c.size; }
+    }
+    if (!pos) return;
+    const rect = canvas.getBoundingClientRect();
+    const derived = computeDerivedStats(playerProgressRef.current.level, playerStatsRef.current);
+    const zoom = 1 / Math.max(0.6, derived.fovMultiplier);
+    const camX = tankPosRef.current.x - rect.width / zoom / 2;
+    const camY = tankPosRef.current.y - rect.height / zoom / 2;
+    const half = size / 2;
+    const sx = rect.left + (pos.x + half - camX) * zoom + 8;
+    const sy = rect.top + (pos.y - half - camY) * zoom;
+    el.style.transform = `translate(${sx}px, ${sy}px)`;
+  }, [popupTarget]);
 
   // Hint text is the one HUD bit that depends on placement state — derived
   // from the controller's active-mode state (which re-renders on transition).
@@ -1374,6 +1573,92 @@ export default function TankShooter() {
           onButtonClick={() => window.location.reload()}
         />
       )}
+      {/* Action popup — left-click a friendly building or core to open.
+          React only owns content (HP / affordability / buttons); the
+          frame loop owns position via direct DOM mutation through
+          popupElRef. Dismissed via Escape or any click outside. */}
+      {(() => {
+        if (!popupTarget) return null;
+        if (popupTarget.kind === 'building') {
+          const b = buildingsRef.current.find((bb) => bb.id === popupTarget.id);
+          if (!b || b.hp <= 0) return null; // cleanup effect closes shortly
+          const preview = previewBuildingUpgrade(b, buildableLevelCap);
+          const affordable = preview !== null && flux >= preview.cost;
+          // Block-reason text covers tier gates only — the flux-shortage
+          // case is communicated by the disabled button + visible cost,
+          // so we deliberately leave the reason empty there.
+          let blocked = '';
+          if (b.level >= MAX_ENTITY_LEVEL) blocked = 'Already at max level';
+          else if (b.level + 1 > buildableLevelCap) blocked = `Upgrade core to L${b.level + 1} to unlock`;
+          const refund = buildingSellRefund(b);
+          return (
+            <ActionPopup
+              ref={popupElRef}
+              kind="building"
+              name={BUILDING_KIND_LABEL[b.kind]}
+              level={b.level}
+              currentHp={b.hp}
+              maxHp={b.maxHp}
+              bulletDamage={b.bulletDamage}
+              fluxPerSecond={b.fluxPerSecond}
+              upgrade={preview ? {
+                cost: preview.cost,
+                hpDelta: preview.hpDelta,
+                bulletDamageDelta: preview.bulletDamageDelta,
+                fluxPerSecondDelta: preview.fluxPerSecondDelta,
+                affordable,
+              } : null}
+              blockedReason={blocked}
+              sellRefund={refund}
+              onUpgrade={() => {
+                if (!preview || !affordable) return;
+                fluxRef.current -= preview.cost;
+                setFlux(Math.floor(fluxRef.current));
+                upgradeBuilding(b, buildableLevelCap);
+                // Bump tick so the popup re-derives against the new level.
+                setPopupTick((t) => t + 1);
+              }}
+              onSell={() => {
+                fluxRef.current += refund;
+                setFlux(Math.floor(fluxRef.current));
+                buildingsRef.current = buildingsRef.current.filter((bb) => bb.id !== b.id);
+                setPopupTarget(null);
+              }}
+            />
+          );
+        }
+        // Core variant — no sell button.
+        const c = coresRef.current.find((cc) => cc.id === popupTarget.id);
+        if (!c || c.hp <= 0) return null;
+        const preview = previewCoreUpgrade(c);
+        const affordable = preview !== null && flux >= preview.cost;
+        let blocked = '';
+        if (c.level >= MAX_ENTITY_LEVEL) blocked = 'Already at max level';
+        else blocked = `Unlocks Tier ${c.level + 1} buildings`;
+        return (
+          <ActionPopup
+            ref={popupElRef}
+            kind="core"
+            name="Core"
+            level={c.level}
+            currentHp={c.hp}
+            maxHp={c.maxHp}
+            upgrade={preview ? {
+              cost: preview.cost,
+              hpDelta: preview.hpDelta,
+              affordable,
+            } : null}
+            blockedReason={blocked}
+            onUpgrade={() => {
+              if (!preview || !affordable) return;
+              fluxRef.current -= preview.cost;
+              setFlux(Math.floor(fluxRef.current));
+              upgradeCore(c);
+              setPopupTick((t) => t + 1);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

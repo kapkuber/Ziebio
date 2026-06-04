@@ -1,11 +1,28 @@
 // Core: the player's base. Placed by the player, takes contact damage from
 // polygons, and when destroyed ends the run.
+//
+// The core is the SOLE FLUX-GATED PROGRESSION HUB. Its level determines the
+// maximum tier the player can place / upgrade buildings to (Core L2 → L2
+// buildings allowed, …, Core L5 → L5 buildings allowed). Upgrading the core
+// costs flux per CORE_UPGRADE_COSTS in `balance.ts`; HP scales with the
+// shared building HP-growth formula so a high-level core is meaningfully
+// tougher.
+import {
+  CORE_UPGRADE_COSTS,
+  MAX_ENTITY_LEVEL,
+  coreUpgradeCost,
+  scaleBuildingHp,
+} from './balance';
 import { GRID_SIZE } from './config';
 import type { GameEntity, Vec2 } from './entities';
 import { aabbCircleMTV } from './geometry';
 import { drawInnerHpBar } from './hpBar';
 import type { Bullet } from './tank';
 import { LOCAL_PLAYER_TEAM, getTeamPalette, type TeamId } from './teams';
+
+// Re-export so callers reading the cost don't need to round-trip through
+// balance.ts every time. Keeps "core economics live on the core" tidy.
+export { CORE_UPGRADE_COSTS, coreUpgradeCost };
 
 export const CORE_GRID_CELLS = 8;
 export const CORE_SIZE = CORE_GRID_CELLS * GRID_SIZE;
@@ -36,6 +53,10 @@ export interface Core {
   maxHp: number;
   ownerId: number; // 0 = local player; reserved for per-player attribution
   teamId: TeamId;  // drives accent color via getTeamPalette
+  // Core tier (1..MAX_ENTITY_LEVEL). Cap on placeable / upgradeable
+  // building level. Visuals can branch on this inside drawCore to render
+  // per-tier hardware (extra ring panels at L3+, etc.) — see CLAUDE.md.
+  level: number;
 }
 
 export function createCore(
@@ -43,16 +64,58 @@ export function createCore(
   center: Vec2,
   teamId: TeamId = LOCAL_PLAYER_TEAM,
   ownerId: number = 0,
+  level: number = 1,
 ): Core {
+  const clamped = Math.max(1, Math.min(MAX_ENTITY_LEVEL, level));
+  const maxHp = scaleBuildingHp(CORE_MAX_HP, clamped);
   return {
     id,
     pos: { x: center.x, y: center.y },
     size: CORE_SIZE,
-    hp: CORE_MAX_HP,
-    maxHp: CORE_MAX_HP,
+    hp: maxHp,
+    maxHp,
     ownerId,
     teamId,
+    level: clamped,
   };
+}
+
+// Stat preview for the upgrade popup — what one tier of core upgrade
+// changes. Pure read; the popup uses this to render the "current → next"
+// table. Returns null if the core is already at cap.
+export interface CoreUpgradePreview {
+  fromLevel: number;
+  toLevel: number;
+  cost: number;
+  hpBefore: number;
+  hpAfter: number;
+  hpDelta: number;
+}
+
+export function previewCoreUpgrade(core: Core): CoreUpgradePreview | null {
+  if (core.level >= MAX_ENTITY_LEVEL) return null;
+  const toLevel = core.level + 1;
+  const hpAfter = scaleBuildingHp(CORE_MAX_HP, toLevel);
+  return {
+    fromLevel: core.level,
+    toLevel,
+    cost: coreUpgradeCost(core.level),
+    hpBefore: core.maxHp,
+    hpAfter,
+    hpDelta: hpAfter - core.maxHp,
+  };
+}
+
+// Mutates the core in place: bumps level, re-scales maxHp, heals to full.
+// Full-heal-on-upgrade matches the RTS convention and rewards the player
+// for the flux investment. Returns true on success, false if at cap.
+// Caller is responsible for deducting flux BEFORE calling.
+export function upgradeCore(core: Core): boolean {
+  if (core.level >= MAX_ENTITY_LEVEL) return false;
+  core.level += 1;
+  core.maxHp = scaleBuildingHp(CORE_MAX_HP, core.level);
+  core.hp = core.maxHp;
+  return true;
 }
 
 // Snap a world coordinate so the core's bounding box aligns to the GRID_SIZE
@@ -221,9 +284,12 @@ interface DrawCoreOptions {
   hpRatio?: number;   // 0..1
 }
 
+// `core` carries `level` so per-tier visuals can branch on tier later
+// (see CLAUDE.md "Per-level visuals"). Placement previews construct a
+// partial with `level: 1` since the first placement is always L1.
 export function drawCore(
   ctx: CanvasRenderingContext2D,
-  core: Pick<Core, 'pos' | 'size' | 'teamId'>,
+  core: Pick<Core, 'pos' | 'size' | 'teamId' | 'level'>,
   camera: { x: number; y: number; width: number; height: number },
   options: DrawCoreOptions = {},
 ): void {
@@ -344,4 +410,25 @@ export function drawCore(
   }
 
   ctx.restore();
+}
+
+// Returns the live friendly core whose AABB contains the world-space
+// point, or null. Used by the action-popup click handler to detect
+// whether the player clicked a core to open the upgrade dialog. Hostile
+// cores are ignored — clicking them would never open a popup.
+export function findCoreAtPoint(
+  cores: Core[],
+  teamId: TeamId,
+  x: number,
+  y: number,
+): Core | null {
+  for (const c of cores) {
+    if (c.hp <= 0 || c.teamId !== teamId) continue;
+    const half = c.size * 0.5;
+    if (x >= c.pos.x - half && x <= c.pos.x + half &&
+        y >= c.pos.y - half && y <= c.pos.y + half) {
+      return c;
+    }
+  }
+  return null;
 }

@@ -361,3 +361,231 @@
 #root .death-overlay .death-respawn-btn:active {
   filter: brightness(0.92);
 }
+
+/* === Action popup (building / core upgrade dialog) ===
+   Built from the same chassis vocabulary the in-world structures use:
+   `#909295` plate fill with translucency, hard `#575757` outline, corner
+   bolts mirroring the turret's armored corners, plate-style buttons
+   with HUD-palette accent stripes (`#5cf2a6` score green for upgrade,
+   `#f3dd6a` level yellow for sell).
+   No close button — Escape or any click outside the popup dismisses it.
+   No soft shadows; corners max 2px; no glassy gradients. */
+
+/* Palette references (kept inline for grep-ability):
+   --plate         #909295  (chassis plate fill — see CORE_PLATE_FILL)
+   --plate-bright  #a1a3a6  (turret corner panel highlight)
+   --plate-dark    #737578  (recessed surface tone)
+   --outline       #575757  (universal chassis outline — CORE_OUTLINE)
+   --hud-score     #5cf2a6  (HUD score green — upgrade accent + delta text)
+   --hud-bodydmg   #D83848  (HUD bodyDamage red — sell accent: "destruction")
+*/
+
+#root .action-popup {
+  position: fixed;
+  /* The frame loop sets `transform: translate(Xpx, Ypx)` each tick from
+     the same camera math the canvas uses, so the popup is glued to its
+     target with zero React-render lag. Origin is viewport (0, 0); the
+     transform places the popup at the target's screen-space anchor.
+     `will-change: transform` keeps the panel on the compositor layer so
+     per-frame writes avoid layout/paint churn. */
+  left: 0;
+  top: 0;
+  will-change: transform;
+  z-index: 10000;
+  min-width: 230px;
+  /* Translucent chassis plate — the panel reads as carved out of the
+     same gray material the buildings are. */
+  background: rgba(144, 146, 149, 0.86);
+  border: 3px solid #575757;
+  border-radius: 2px;
+  padding: 0;
+  font-family: "Ubuntu", system-ui, sans-serif;
+  color: #ffffff;
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+/* Corner bolts — small dark dots inset from each corner. Mirrors the
+   turret-interior bolt pattern that hugs the octagonal armor base. */
+#root .action-popup-bolt {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  background: #575757;
+  border-radius: 1px;
+  pointer-events: none;
+}
+#root .action-popup-bolt-tl { top: 4px; left: 4px; }
+#root .action-popup-bolt-tr { top: 4px; right: 4px; }
+#root .action-popup-bolt-bl { bottom: 4px; left: 4px; }
+#root .action-popup-bolt-br { bottom: 4px; right: 4px; }
+
+/* === Header strip ===
+   Recessed darker plate at the top. Title + level subtitle stacked
+   vertically — name (all-caps, tracked) on top, "Level N" (smaller,
+   less aggressive) below. */
+#root .action-popup-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 16px 8px 16px;
+  background: rgba(87, 87, 87, 0.65);
+  border-bottom: 2px solid #575757;
+}
+
+#root .action-popup-title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #ffffff;
+  line-height: 1;
+  /* Subtle text outline matches the chassis-stroke language. */
+  paint-order: stroke fill;
+  -webkit-text-stroke: 2px #000000;
+}
+
+#root .action-popup-subtitle {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  color: #d8d8d8;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+/* === Stats block ===
+   Recessed plate band hosting the HP row + bar + any extra-stat rows.
+   No per-row sub-panels — each stat is one flat line. */
+#root .action-popup-stats {
+  padding: 9px 16px 10px 16px;
+  background: rgba(115, 117, 120, 0.42);
+  border-bottom: 2px solid #575757;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+#root .action-popup-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+}
+
+#root .action-popup-stat-label {
+  color: #d8d8d8;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+#root .action-popup-value-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+#root .action-popup-value {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+#root .action-popup-delta {
+  color: #5cf2a6;
+  font-weight: 700;
+}
+
+/* In-world HP bar style: dark recessed track + bright green fill. The
+   width is set inline from the building's current HP %. */
+#root .action-popup-hp-track {
+  height: 6px;
+  background: #484848;
+  border: 1px solid #575757;
+  border-radius: 1px;
+  overflow: hidden;
+}
+#root .action-popup-hp-fill {
+  height: 100%;
+  background: #85e37d;
+}
+
+/* === Action buttons ===
+   Plate-style: gray base + hard outline + 3px top accent stripe in the
+   appropriate HUD palette color. Mirrors how the in-world chassis uses a
+   colored accent band as the only "team identity" cue on otherwise
+   neutral gray hardware. */
+#root .action-popup-actions {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px 12px 16px;
+}
+
+#root .action-popup-btn {
+  flex: 1;
+  padding: 9px 8px 6px 8px;
+  border: 2px solid #575757;
+  border-radius: 1px;
+  background: rgba(144, 146, 149, 0.92);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  transition: background 80ms ease-out, transform 60ms ease-out;
+  /* Top accent stripe — colored band hugging the inner top edge of the
+     button, like the turret's muzzle-band accent. */
+  box-shadow: inset 0 3px 0 0 var(--btn-accent, #cccccc);
+}
+#root .action-popup-btn:hover {
+  background: rgba(161, 163, 166, 0.96);
+}
+#root .action-popup-btn:active {
+  background: rgba(115, 117, 120, 0.96);
+  transform: translateY(1px);
+}
+
+#root .action-popup-btn-upgrade { --btn-accent: #5cf2a6; }
+#root .action-popup-btn-sell    { --btn-accent: #D83848; }
+
+#root .action-popup-btn-label {
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: #ffffff;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 1.5px #000000;
+}
+
+#root .action-popup-btn-cost {
+  font-size: 10px;
+  color: #e2e2e2;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+}
+
+#root .action-popup-btn.is-disabled,
+#root .action-popup-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.6);
+}
+#root .action-popup-btn.is-disabled:hover,
+#root .action-popup-btn[disabled]:hover {
+  background: rgba(144, 146, 149, 0.92);
+}
+
+#root .action-popup-blocked {
+  padding: 0 16px 12px 16px;
+  margin-top: -6px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #d8b4b4;
+  text-align: center;
+}

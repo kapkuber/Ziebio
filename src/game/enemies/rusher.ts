@@ -151,8 +151,9 @@ function updateRusher(enemy: Enemy, ctx: EnemyUpdateContext): void {
     const ddx = enemy.pos.x - cx;
     const ddy = enemy.pos.y - cy;
     if (ddx * ddx + ddy * ddy < r2) {
-      c.hp = Math.max(0, c.hp - RUSHER_KAMIKAZE_TO_CORE);
-      ctx.onCoreDamaged?.(c, RUSHER_KAMIKAZE_TO_CORE);
+      // Scaled kamikaze values stored on the rusher at spawn (level-aware).
+      c.hp = Math.max(0, c.hp - enemy.kamikazeToCore);
+      ctx.onCoreDamaged?.(c, enemy.kamikazeToCore);
       enemy.hp = 0;
       return;
     }
@@ -165,7 +166,7 @@ function updateRusher(enemy: Enemy, ctx: EnemyUpdateContext): void {
     const ddx = enemy.pos.x - cx;
     const ddy = enemy.pos.y - cy;
     if (ddx * ddx + ddy * ddy < r2) {
-      b.hp = Math.max(0, b.hp - RUSHER_KAMIKAZE_TO_BUILDING);
+      b.hp = Math.max(0, b.hp - enemy.kamikazeToBuilding);
       enemy.hp = 0;
       return;
     }
@@ -176,7 +177,7 @@ function updateRusher(enemy: Enemy, ctx: EnemyUpdateContext): void {
     const pdy = ctx.playerPos.y - enemy.pos.y;
     const reach = RUSHER_RADIUS + playerR;
     if (pdx * pdx + pdy * pdy < reach * reach) {
-      ctx.damagePlayer(RUSHER_KAMIKAZE_TO_TANK, 'Rusher');
+      ctx.damagePlayer(enemy.kamikazeToTank, 'Rusher');
       enemy.hp = 0;
       return;
     }
@@ -246,6 +247,12 @@ export const RUSHER_DEF: EnemyDef = {
   bodyDamageToTank: RUSHER_BODY_DAMAGE_TO_TANK,
   bodyDamageToCore: RUSHER_BODY_DAMAGE_TO_CORE,
   bulletReduction: RUSHER_BULLET_REDUCTION,
+  // Kamikaze burst values — scale per level so a high-level rusher's
+  // contact still feels like an "instant deletion" threat for whatever
+  // the player has at that wave.
+  kamikazeToTank: RUSHER_KAMIKAZE_TO_TANK,
+  kamikazeToBuilding: RUSHER_KAMIKAZE_TO_BUILDING,
+  kamikazeToCore: RUSHER_KAMIKAZE_TO_CORE,
   // The drawBarrel slot is overloaded for the rusher: drawBarrel renders
   // the spike ring (not a barrel). barrelLength reports the visual extent
   // PAST the chassis so the cull check accounts for the spike tips.
